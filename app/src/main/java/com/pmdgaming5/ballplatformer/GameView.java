@@ -10,463 +10,96 @@ import android.view.View;
 import java.util.*;
 
 public final class GameView extends View {
-    private static final int LEVELS = 32;
-    private static final int ENDLESS = 33;
-    private static final float PLAYER_R = 28f;
-    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final int LEVELS=32, ENDLESS=33;
+    private static final float R=30f;
+    private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG), s=new Paint(Paint.ANTI_ALIAS_FLAG);
     private final SharedPreferences prefs;
-    private final Random rng = new Random(1337);
-    private final ArrayList<RectF> solids = new ArrayList<>();
-    private final ArrayList<RectF> spikes = new ArrayList<>();
-    private final ArrayList<RectF> springs = new ArrayList<>();
-    private final ArrayList<Checkpoint> checkpoints = new ArrayList<>();
-    private final ArrayList<Platform> platforms = new ArrayList<>();
-    private final ArrayList<Gem> gems = new ArrayList<>();
-    private final ArrayList<Enemy> enemies = new ArrayList<>();
-    private final ArrayList<Particle> particles = new ArrayList<>();
-    private final ArrayList<Projectile> projectiles = new ArrayList<>();
+    private final ArrayList<RectF> solids=new ArrayList<>(), spikes=new ArrayList<>(), springs=new ArrayList<>();
+    private final ArrayList<Checkpoint> checkpoints=new ArrayList<>(), gems=new ArrayList<>(), particles=new ArrayList<>(), shots=new ArrayList<>();
+    private final ArrayList<Platform> platforms=new ArrayList<>(), enemies=new ArrayList<>();
+    private int ui=0,level=1,unlocked,totalGems,levelGems,deaths,bestEndless,endlessScore,skin,theme;
+    private boolean muted,endlessMode,bossAlive,lifecyclePaused,grounded,jumpPressed;
+    private float x=260,y=650,vx,vy,cameraX,cameraY,worldW,checkpointX=260,checkpointY=650;
+    private float bossX,bossY,bossHp,bossMaxHp,bossTimer,segmentCursor,shake;
+    private int endlessSeed,leftId=-1,rightId=-1,jumpId=-1;
+    private long groundedAt,jumpUntil,elapsed,lastNs,bossHitAt;
+    private final Random rng=new Random(12345);
 
-    private int ui = 0;
-    private int level = 1;
-    private int unlocked;
-    private int skin;
-    private int totalGems;
-    private int levelGems;
-    private int deaths;
-    private int endlessScore;
-    private int bestEndless;
-    private boolean muted;
-    private boolean endlessMode;
-    private boolean bossAlive;
-    private boolean lifecyclePaused;
-    private boolean left, right, jumpHeld, jumpPressed;
-    private boolean grounded;
-    private long groundedAt, jumpQueuedUntil, bossHitAt;
-    private long elapsedMs, lastNs;
-    private float x = 260, y = 650, vx, vy;
-    private float cameraX, cameraY, worldW;
-    private float checkpointX = 260, checkpointY = 650;
-    private float bossX, bossY, bossHp, bossMaxHp, bossTimer;
-    private float shake;
-    private float segmentCursor;
-    private int endlessSeed;
-    private int currentTheme;
+    public GameView(Context c){super(c);prefs=c.getSharedPreferences("ball_platformer",Context.MODE_PRIVATE);unlocked=clampi(prefs.getInt("unlocked",1),1,LEVELS);totalGems=Math.max(0,prefs.getInt("gems",0));bestEndless=Math.max(0,prefs.getInt("best_endless",0));skin=clampi(prefs.getInt("skin",0),0,2);muted=prefs.getBoolean("muted",false);s.setStyle(Paint.Style.STROKE);setFocusable(true);setLayerType(View.LAYER_TYPE_HARDWARE,null);lastNs=System.nanoTime();}
+    public void resumeGame(){lifecyclePaused=false;lastNs=System.nanoTime();invalidate();}
+    public void pauseForLifecycle(){lifecyclePaused=true;Audio.stopAll();clearPointers();}
+    @Override protected void onDraw(Canvas c){long n=System.nanoTime();float dt=Math.min(.033f,Math.max(0,(n-lastNs)/1_000_000_000f));lastNs=n;if(!lifecyclePaused&&ui==2)update(dt);render(c);postInvalidateOnAnimation();}
 
-    public GameView(Context context) {
-        super(context);
-        prefs = context.getSharedPreferences("ball_platformer", Context.MODE_PRIVATE);
-        unlocked = clampInt(prefs.getInt("unlocked", 1), 1, LEVELS);
-        totalGems = Math.max(0, prefs.getInt("gems", 0));
-        bestEndless = Math.max(0, prefs.getInt("best_endless", 0));
-        skin = clampInt(prefs.getInt("skin", 0), 0, 2);
-        muted = prefs.getBoolean("muted", false);
-        stroke.setStyle(Paint.Style.STROKE);
-        setFocusable(true);
-        setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        lastNs = System.nanoTime();
-    }
+    private void update(float dt){elapsed+=(long)(dt*1000);updatePlatforms(dt);if(endlessMode)ensureEndless();move(dt);for(Enemy e:enemies)if(e.alive)e.update(dt);for(Shot q:shots){q.x+=q.vx*dt;q.y+=q.vy*dt;q.vy+=520*dt;q.life-=dt;}shots.removeIf(q->q.life<=0||q.x<cameraX-700||q.x>cameraX+getWidth()+900);collect();hazards();checkpoints();boss(dt);for(Particle q:particles){q.life-=dt;q.x+=q.vx*dt;q.y+=q.vy*dt;q.vy+=520*dt;q.vx*=.985f;}particles.removeIf(q->q.life<=0);if(!endlessMode&&!bossAlive&&x>worldW-180)finish();if(endlessMode)endlessScore=Math.max(endlessScore,(int)((x-260)/7)+levelGems*100);if(endlessScore>bestEndless){bestEndless=endlessScore;save();}camera(dt);}
 
-    public void resumeGame() { lifecyclePaused = false; lastNs = System.nanoTime(); invalidate(); }
-    public void pauseForLifecycle() { lifecyclePaused = true; Audio.stopAll(); }
+    private void move(float dt){boolean L=leftId>=0,Rr=rightId>=0; if(L)vx-=1750*dt;if(Rr)vx+=1750*dt;if(!L&&!Rr)vx*=Math.pow(.0012,dt);vx=clamp(vx,-690,690);long now=SystemClock.uptimeMillis();if(jumpPressed){jumpUntil=now+150;jumpPressed=false;}if(now<=jumpUntil&&(grounded||now-groundedAt<130)){vy=-1020;grounded=false;jumpUntil=0;burst(x,y+R,10,0xFFBDEBFF);Audio.play(Audio.JUMP,muted);}if(jumpId<0&&vy<-420)vy+=1700*dt;vy+=2450*dt;vy=clamp(vy,-1180,1500);float ox=x,oy=y;x+=vx*dt;y+=vy*dt;grounded=false;for(RectF q:solids)resolve(q,ox,oy);for(Platform m:platforms){RectF q=m.rect();if(circleRect(x,y,R,q)&&oy+R<=q.top+8&&y+R>=q.top){y=q.top-R;vy=0;grounded=true;groundedAt=now;x+=m.dx;y+=m.dy;}}if(y>1400)respawn();}
+    private void resolve(RectF q,float ox,float oy){if(!circleRect(x,y,R,q))return;if(ox+R<=q.left&&x+R>q.left){x=q.left-R;vx=-Math.abs(vx)*.12f;}else if(ox-R>=q.right&&x-R<q.right){x=q.right+R;vx=Math.abs(vx)*.12f;}else if(oy+R<=q.top&&y+R>q.top){y=q.top-R;vy=0;grounded=true;groundedAt=SystemClock.uptimeMillis();}else if(oy-R>=q.bottom&&y-R<q.bottom){y=q.bottom+R;vy=Math.max(0,vy);}}
+    private void updatePlatforms(float dt){for(Platform m:platforms){float ox=m.x,oy=m.y;m.t+=dt*m.speed;float z=(float)Math.sin(m.t)*m.range;if(m.axis==0)m.x=m.bx+z;else m.y=m.by+z;m.dx=m.x-ox;m.dy=m.y-oy;}}
 
-    @Override protected void onDraw(Canvas canvas) {
-        long now = System.nanoTime();
-        float dt = Math.min(0.033f, Math.max(0f, (now - lastNs) / 1_000_000_000f));
-        lastNs = now;
-        if (!lifecyclePaused && ui == 2) update(dt);
-        render(canvas);
-        postInvalidateOnAnimation();
-    }
+    private void collect(){for(Gem g:gems)if(!g.got&&hit(x,y,R,g.x,g.y,g.r)){g.got=true;levelGems++;totalGems++;save();burst(g.x,g.y,12,0xFFFFD54A);Audio.play(Audio.COIN,muted);}}
+    private void hazards(){for(RectF q:spikes)if(circleRect(x,y,R,q)){respawn();return;}for(RectF q:springs)if(circleRect(x,y,R,q)&&vy>=0){y=q.top-R;vy=-1320;grounded=false;burst(x,y+R,14,0xFF74E7FF);Audio.play(Audio.SPRING,muted);}for(Shot q:shots)if(hit(x,y,R,q.x,q.y,q.r)){respawn();return;}for(Enemy e:enemies)if(e.alive&&hit(x,y,R,e.x,e.y,e.size*.72f)){long now=SystemClock.uptimeMillis();boolean stomp=vy>0&&y+R<e.y+e.size*.35f&&Math.abs(x-e.x)<e.size*.9f;if(stomp&&now-e.hitAt>250){e.alive=false;vy=-900;burst(e.x,e.y,18,0xFFFFC04A);Audio.play(Audio.COIN,muted);}else if(now-e.hitAt>500){e.hitAt=now;respawn();return;}}}
+    private void checkpoints(){for(Checkpoint q:checkpoints)if(!q.active&&Math.abs(x-q.x)<48&&Math.abs(y-q.y)<110){q.active=true;checkpointX=q.x;checkpointY=q.y-60;burst(q.x,q.y-58,16,0xFF7DFFB2);Audio.play(Audio.CHECK,muted);}}
 
-    private void update(float dt) {
-        elapsedMs += (long)(dt * 1000f);
-        updatePlatforms(dt);
-        if (endlessMode) ensureEndlessWorld();
-        movePlayer(dt);
-        for (Enemy e : enemies) e.update(dt);
-        for (Projectile p : projectiles) {
-            p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 520f * dt; p.life -= dt;
-        }
-        projectiles.removeIf(p -> p.life <= 0f || p.x < cameraX - 600 || p.x > cameraX + getWidth() + 800);
-        collectGems();
-        checkHazards();
-        updateCheckpoints();
-        updateBoss(dt);
-        updateParticles(dt);
-        if (!endlessMode && !bossAlive && x >= worldW - 170) finishLevel();
-        if (endlessMode) updateEndlessScore();
-        cameraFollow(dt);
-    }
+    private void boss(float dt){if(!bossAlive)return;if(bossHp<=0){bossAlive=false;burst(bossX,bossY,55,0xFFFFD166);Audio.play(Audio.WIN,muted);return;}bossTimer+=dt;bossX+=(x-bossX)*Math.min(1,dt*1.15f);bossY=600+(float)Math.sin(bossTimer*2.1)*36;if(bossTimer>1.15){bossTimer=0;float dx=x-bossX,dy=y-bossY,len=Math.max(1,(float)Math.hypot(dx,dy));shots.add(new Shot(bossX,bossY,dx/len*430,dy/len*430,15));Audio.play(Audio.BOSS,muted);}long now=SystemClock.uptimeMillis();if(hit(x,y,R,bossX,bossY,72)&&now-bossHitAt>700)respawn();if(vy>0&&y+R<bossY+22&&y+R>bossY-50&&Math.abs(x-bossX)<82&&now-bossHitAt>450){bossHp-=25;bossHitAt=now;vy=-850;burst(bossX,bossY,20,0xFFFFA95A);Audio.play(Audio.COIN,muted);}}
+    private void respawn(){deaths++;x=checkpointX;y=checkpointY;vx=vy=0;shake=.55f;shots.clear();burst(x,y,18,0xFFFF6B6B);Audio.play(Audio.HURT,muted);}
+    private void finish(){ui=4;if(level<LEVELS)unlocked=Math.max(unlocked,level+1);save();Audio.stopAll();Audio.play(Audio.WIN,muted);burst(x,y,42,0xFFFFD166);}
 
-    private void movePlayer(float dt) {
-        if (left) vx -= 1650f * dt;
-        if (right) vx += 1650f * dt;
-        if (!left && !right) vx *= Math.pow(0.0008, dt);
-        vx = clamp(vx, -650f, 650f);
-        long now = SystemClock.uptimeMillis();
-        if (jumpPressed) { jumpQueuedUntil = now + 140; jumpPressed = false; }
-        if (now <= jumpQueuedUntil && (grounded || now - groundedAt < 120)) {
-            vy = -1000f; grounded = false; jumpQueuedUntil = 0;
-            burst(x, y + PLAYER_R, 9, 0xFFBDEBFF); Audio.play(Audio.JUMP, muted);
-        }
-        if (!jumpHeld && vy < -420f) vy += 1600f * dt;
-        vy += 2450f * dt;
-        vy = clamp(vy, -1150f, 1450f);
-        float oldX = x, oldY = y;
-        x += vx * dt; y += vy * dt;
-        grounded = false;
+    private void ensureEndless(){while(segmentCursor<x+getWidth()*3)genSegment();float cut=cameraX-1000;solids.removeIf(q->q.right<cut);spikes.removeIf(q->q.right<cut);springs.removeIf(q->q.right<cut);platforms.removeIf(q->q.x+q.w<cut);gems.removeIf(q->q.x<cut);enemies.removeIf(q->q.x<cut);}
+    private void genSegment(){Random r=new Random(endlessSeed+(long)(segmentCursor*31));float gap=65+r.nextInt(95),w=390+r.nextInt(330),top=720-r.nextInt(180),st=segmentCursor+gap;solids.add(new RectF(st,top,st+w,top+145));if(r.nextFloat()<.70)gems.add(new Gem(st+w*.46f,top-72,r.nextInt()));if(r.nextFloat()<.45)spikes.add(new RectF(st+w*.64f,top-24,st+w*.64f+48,top+18));if(r.nextFloat()<.22)springs.add(new RectF(st+w*.2f,top-27,st+w*.2f+72,top+3));if(r.nextFloat()<.48)enemies.add(new Enemy(st+w*.76f,top-32,r.nextInt(3),95+r.nextInt(70)));if(r.nextFloat()<.30)platforms.add(new Platform(st+w*.34f,top-155,160,25,45+r.nextInt(45),.8f+r.nextFloat()*.8f,r.nextBoolean()?0:1));segmentCursor=st+w;}
 
-        for (RectF s : solids) resolveRect(s, oldX, oldY);
-        for (Platform m : platforms) {
-            RectF r = m.rect();
-            if (circleRect(x, y, PLAYER_R, r) && oldY + PLAYER_R <= r.top + 6f && y + PLAYER_R >= r.top) {
-                y = r.top - PLAYER_R; vy = 0; grounded = true; groundedAt = now; x += m.dx; y += m.dy;
-            }
-        }
-        if (y > 1350f) respawn();
-    }
+    private void startLevel(int id){level=id;endlessMode=false;elapsed=deaths=levelGems=endlessScore=0;bossAlive=false;cameraX=cameraY=0;checkpointX=260;checkpointY=650;x=260;y=650;vx=vy=0;clear();build(id);ui=2;Audio.music(id,muted);}
+    private void startEndless(){level=ENDLESS;endlessMode=true;elapsed=deaths=levelGems=endlessScore=0;bossAlive=false;cameraX=cameraY=0;checkpointX=260;checkpointY=650;x=260;y=650;vx=vy=0;segmentCursor=820;endlessSeed=(int)(System.currentTimeMillis()&0x7fffffff);clear();solids.add(new RectF(0,820,820,145));genSegment();ui=2;Audio.music(0,muted);}
+    private void clear(){solids.clear();spikes.clear();springs.clear();checkpoints.clear();platforms.clear();gems.clear();enemies.clear();particles.clear();shots.clear();}
+    private void build(int id){int world=(id-1)/8,var=(id-1)%8;theme=world;worldW=5900+world*520+var*190;Random r=new Random(id*997);float cur=0;solids.add(new RectF(0,805,820,150));cur=740;for(int i=0;i<18+world;i++){float gap=55+r.nextInt(95),w=360+r.nextInt(300),top=775-(i%3)*55-(var%2)*12;cur+=gap;solids.add(new RectF(cur,top,cur+w,top+145));if(i%2==0)gems.add(new Gem(cur+w*.45f,top-70,i*41));if((i+var)%3==1)spikes.add(new RectF(cur+w*.66f,top-24,cur+w*.66f+48,top+18));if((i+world)%5==2)springs.add(new RectF(cur+w*.2f,top-27,cur+w*.2f+72,top+3));if((i+id)%3!=0)enemies.add(new Enemy(cur+w*.77f,top-32,(i+id)%3,90+(id%5)*14));if(i%4==2)platforms.add(new Platform(cur+w*.32f,top-150,155,24,55+(i%2)*20,.8f+(i%3)*.2f,i%2));if(i==5||i==11)checkpoints.add(new Checkpoint(cur+w*.2f,top));cur+=w;}while(cur<worldW-500){cur+=80;solids.add(new RectF(cur,820,480,140));if(((int)cur/100)%2==0)gems.add(new Gem(cur+215,742,(int)cur));cur+=480;}solids.add(new RectF(worldW-590,560,worldW-270,615));solids.add(new RectF(worldW-270,690,worldW,950));if(id%8==0){bossAlive=true;bossX=worldW-640;bossY=600;bossMaxHp=130+world*40;bossHp=bossMaxHp;}}
 
-    private void resolveRect(RectF r, float oldX, float oldY) {
-        if (!circleRect(x, y, PLAYER_R, r)) return;
-        if (oldX + PLAYER_R <= r.left && x + PLAYER_R > r.left) { x = r.left - PLAYER_R; vx = -Math.abs(vx) * 0.08f; }
-        else if (oldX - PLAYER_R >= r.right && x - PLAYER_R < r.right) { x = r.right + PLAYER_R; vx = Math.abs(vx) * 0.08f; }
-        else if (oldY + PLAYER_R <= r.top && y + PLAYER_R > r.top) { y = r.top - PLAYER_R; vy = 0; grounded = true; groundedAt = SystemClock.uptimeMillis(); }
-        else if (oldY - PLAYER_R >= r.bottom && y - PLAYER_R < r.bottom) { y = r.bottom + PLAYER_R; vy = Math.max(0f, vy); }
-    }
+    private void render(Canvas c){int w=getWidth(),h=getHeight();if(ui==0)menu(c,w,h);else if(ui==1)select(c,w,h);else if(ui==5)settings(c,w,h);else{world(c,w,h);if(ui==3)pause(c,w,h);if(ui==4)win(c,w,h);}}
+    private void world(Canvas c,int w,int h){int top=theme==0?0xFF72D7FF:theme==1?0xFF223B62:theme==2?0xFF45305E:0xFF293844;int bot=theme==0?0xFFB8F28B:theme==1?0xFF6A4F3D:theme==2?0xFF182439:0xFF626E74;p.setShader(new LinearGradient(0,0,0,h,top,bot,Shader.TileMode.CLAMP));c.drawRect(0,0,w,h,p);p.setShader(null);drawSky(c,w,h);c.save();c.translate(-cameraX,-cameraY);if(shake>.01)c.translate((float)Math.sin(elapsed*.03)*shake*10,(float)Math.cos(elapsed*.02)*shake*10);for(RectF q:solids)drawGround(c,q);for(Platform m:platforms)drawPlatform(c,m);for(RectF q:springs)drawSpring(c,q);for(RectF q:spikes)drawSpike(c,q);for(Checkpoint q:checkpoints)drawFlag(c,q);for(Gem q:gems)if(!q.got)drawStar(c,q);for(Enemy e:enemies)if(e.alive)e.draw(c);for(Shot q:shots)drawShot(c,q);if(bossAlive)drawBoss(c);if(!endlessMode)drawGoal(c);for(Particle q:particles)drawParticle(c,q);drawBall(c);c.restore();hud(c,w,h);controls(c,w,h);}
+    private void drawSky(Canvas c,int w,int h){if(theme!=0)return;p.setColor(0x66FFFFFF);for(int i=0;i<5;i++){float cx=(i*260+80)-(cameraX*.08f%1300),cy=95+(i%2)*58;c.drawOval(cx,cy,cx+130,cy+38,p);c.drawOval(cx+45,cy-18,cx+175,cy+38,p);}p.setColor(0xFFFFE37A);c.drawCircle(w-100,95,42,p);}
+    private void drawGround(Canvas c,RectF q){p.setColor(theme==0?0xFF6A421F:theme==1?0xFF66503C:theme==2?0xFF283040:0xFF49535A);c.drawRoundRect(q,12,12,p);p.setColor(theme==0?0xFF72C83E:theme==1?0xFF7A9B61:0xFF5C6871);c.drawRoundRect(q.left,q.top,q.right,q.top+18,10,10,p);if(theme==0){p.setColor(0xFF3C9D2B);for(int i=(int)q.left;i<q.right;i+=34){Path z=new Path();z.moveTo(i,q.top+18);z.lineTo(i+8,q.top+4);z.lineTo(i+14,q.top+18);z.close();c.drawPath(z,p);}}p.setColor(0x33301000);for(int i=(int)q.left+30;i<q.right;i+=90)c.drawCircle(i,q.top+58,10,p);}
+    private void drawPlatform(Canvas c,Platform m){p.setColor(0xFFB98B5B);c.drawRoundRect(m.rect(),8,8,p);p.setColor(0xFF7D5939);c.drawCircle(m.x+25,m.y+12,3,p);c.drawCircle(m.x+m.w-30,m.y+12,3,p);}
+    private void drawSpring(Canvas c,RectF q){p.setColor(0xFF536A72);c.drawRoundRect(q,7,7,p);p.setColor(0xFF5DE0FF);c.drawRect(q.left+5,q.top+4,q.right-5,q.top+9,p);}
+    private void drawSpike(Canvas c,RectF q){p.setColor(0xFFE9EDF0);Path z=new Path();z.moveTo(q.left,q.bottom);for(int i=0;i<3;i++){float a=q.left+(i+.5f)*(q.width()/3f);z.lineTo(a,q.top);z.lineTo(q.left+(i+1)*(q.width()/3f),q.bottom);}z.close();c.drawPath(z,p);p.setColor(0xFF6C737A);c.drawRect(q.left,q.bottom-5,q.right,q.bottom,p);}
+    private void drawFlag(Canvas c,Checkpoint q){p.setColor(0xFF6B523B);c.drawRect(q.x,q.y-78,q.x+5,q.y,p);p.setColor(q.active?0xFF57E37D:0xFFFF5B5B);Path z=new Path();z.moveTo(q.x+5,q.y-76);z.lineTo(q.x+58,q.y-60);z.lineTo(q.x+5,q.y-44);z.close();c.drawPath(z,p);}
+    private void drawStar(Canvas c,Gem g){c.save();c.translate(g.x,g.y);float sc=1+(float)Math.sin((elapsed+g.phase)*.006)*.08f;c.scale(sc,sc);p.setShadowLayer(14,0,0,0x99FFD43B);p.setColor(0xFFFFD43B);Path z=new Path();for(int i=0;i<10;i++){double a=-Math.PI/2+i*Math.PI/5;float rr=i%2==0?18:8;float px=(float)Math.cos(a)*rr,py=(float)Math.sin(a)*rr;if(i==0)z.moveTo(px,py);else z.lineTo(px,py);}z.close();c.drawPath(z,p);p.clearShadowLayer();p.setColor(Color.WHITE);c.drawCircle(-5,-5,3,p);c.restore();}
+    private void drawBall(Canvas c){c.save();c.translate(x,y);int base=skin==0?0xFFD63B45:skin==1?0xFFE95BA5:0xFF5FD06A;p.setShader(new RadialGradient(-11,-13,R,new int[]{Color.WHITE,base,base,0xFF6A1620},new float[]{0,.12f,.63f,1},Shader.TileMode.CLAMP));p.setShadowLayer(15,0,10,0x88000000);c.drawCircle(0,0,R,p);p.clearShadowLayer();p.setShader(null);p.setColor(Color.WHITE);c.drawOval(-15,-10,-2,4,p);c.drawOval(3,-10,16,4,p);p.setColor(0xFF24313E);c.drawCircle(-9,-3,4,p);c.drawCircle(9,-3,4,p);p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(4);p.setColor(0xFF741725);c.drawArc(-13,2,13,21,12,145,false,p);p.setStyle(Paint.Style.FILL);p.setColor(0xFFFFB6B6);c.drawCircle(-6,10,3,p);c.restore();}
+    private void drawShot(Canvas c,Shot q){p.setColor(0xFFFF7043);p.setShadowLayer(12,0,0,0xAAFF7043);c.drawCircle(q.x,q.y,q.r,p);p.clearShadowLayer();}
+    private void drawBoss(Canvas c){p.setShadowLayer(24,0,12,0xAA000000);p.setColor(0xFF4E5660);c.drawRoundRect(bossX-76,bossY-76,bossX+76,bossY+76,14,14,p);p.clearShadowLayer();p.setColor(0xFFE73D45);c.drawCircle(bossX-25,bossY-12,16,p);c.drawCircle(bossX+25,bossY-12,16,p);p.setColor(Color.WHITE);c.drawCircle(bossX-25,bossY-12,7,p);c.drawCircle(bossX+25,bossY-12,7,p);p.setColor(0xFF2A2026);c.drawRoundRect(bossX-45,bossY+18,bossX+45,bossY+42,10,10,p);p.setColor(0xFFFFF2DA);for(int i=0;i<7;i++)c.drawRect(bossX-35+i*11,bossY+21,bossX-29+i*11,bossY+39,p);p.setColor(0xFF20252C);c.drawRect(bossX-82,bossY-104,bossX+82,bossY-92,p);p.setColor(0xFF62E37E);c.drawRect(bossX-79,bossY-101,bossX-79+158*(bossHp/bossMaxHp),bossY-95,p);}
+    private void drawGoal(Canvas c){p.setColor(0xFF5C4932);c.drawRect(worldW-110,555,worldW-104,650,p);p.setColor(0xFFFF5E62);Path z=new Path();z.moveTo(worldW-104,560);z.lineTo(worldW-44,577);z.lineTo(worldW-104,594);z.close();c.drawPath(z,p);}
+    private void drawParticle(Canvas c,Particle q){p.setAlpha((int)(255*Math.max(0,q.life/q.max)));p.setColor(q.color);c.drawCircle(q.x,q.y,q.size,p);p.setAlpha(255);}
 
-    private void updatePlatforms(float dt) {
-        for (Platform p : platforms) {
-            float ox = p.x, oy = p.y;
-            p.t += dt * p.speed;
-            float z = (float)Math.sin(p.t) * p.range;
-            if (p.axis == 0) p.x = p.baseX + z; else p.y = p.baseY + z;
-            p.dx = p.x - ox; p.dy = p.y - oy;
-        }
-    }
+    private void hud(Canvas c,int w,int h){p.setColor(0xAA17324A);c.drawRoundRect(18,16,315,70,20,20,p);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(20);c.drawText(endlessMode?"ENDLESS  "+endlessScore:"LEVEL  "+level+"   ★ "+levelGems,34,50,p);p.setTypeface(Typeface.DEFAULT);p.setTextSize(15);c.drawText(formatTime(elapsed),230,50,p);button(c,w-68,44,64,54,"Ⅱ",0x663A5877);}
+    private void controls(Canvas c,int w,int h){float cy=h-78;float bw=Math.max(112,w*.16f),bh=86;button(c,bw*.55f,cy,bw,bh,"‹",0x66324D63);button(c,bw*1.55f,cy,bw,bh,"›",0x66324D63);float jw=Math.max(128,w*.19f);button(c,w-jw*.58f,cy,jw,bh,"↑",0x667DFFB2);}
+    private void menu(Canvas c,int w,int h){p.setShader(new LinearGradient(0,0,w,h,0xFF5BC6FF,0xFFB7F28B,Shader.TileMode.CLAMP));c.drawRect(0,0,w,h,p);p.setShader(null);p.setColor(0xFFFFE67A);c.drawCircle(w-110,92,44,p);drawLogo(c,w/2f,h*.29f,84);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setColor(Color.WHITE);p.setTextSize(48);c.drawText("BALL",w/2f,h*.49f,p);p.setColor(0xFFBFEFFF);p.setTextSize(40);c.drawText("PLATFORMER",w/2f,h*.56f,p);button(c,w/2f,h*.66f,290,72,"PLAY",0xCC2E8DB8);button(c,w/2f,h*.75f,290,66,"LEVEL SELECT",0x88455B67);button(c,w/2f,h*.83f,290,66,"ENDLESS MODE",0x88455B67);button(c,w*.85f,h*.75f,80,62,"⚙",0x88455B67);p.setTypeface(Typeface.DEFAULT);p.setTextSize(13);p.setColor(0xDDFFFFFF);c.drawText("32 levels • bosses • stars • checkpoints • endless",w/2f,h-20,p);p.setTextAlign(Paint.Align.LEFT);}
+    private void drawLogo(Canvas c,float xx,float yy,float rr){p.setShader(new RadialGradient(xx-18,yy-22,rr,new int[]{Color.WHITE,0xFFFFB8BD,0xFFD63B45,0xFF7A1822},new float[]{0,.12f,.63f,1},Shader.TileMode.CLAMP));c.drawCircle(xx,yy,rr,p);p.setShader(null);p.setColor(Color.WHITE);c.drawOval(xx-42,yy-28,xx-18,yy-2,p);c.drawOval(xx+10,yy-28,xx+34,yy-2,p);p.setColor(0xFF27313C);c.drawCircle(xx-30,yy-13,6,p);c.drawCircle(xx+22,yy-13,6,p);}
+    private void select(Canvas c,int w,int h){p.setColor(0xFF0C2A33);c.drawRect(0,0,w,h,p);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(34);c.drawText("SELECT LEVEL",28,52,p);p.setTypeface(Typeface.DEFAULT);p.setTextSize(15);p.setColor(0xCCFFFFFF);c.drawText("Unlocked "+unlocked+" / "+LEVELS,30,78,p);float gx=w/8.5f;for(int i=1;i<=LEVELS;i++){int rr=(i-1)/8,cc=(i-1)%8;float px=54+cc*gx,py=124+rr*70;boolean open=i<=unlocked;p.setColor(open?0xFF2E7181:0xFF33404A);c.drawRoundRect(px-40,py-25,px+40,py+25,14,14,p);p.setTextAlign(Paint.Align.CENTER);p.setColor(open?0xFFFFD43B:0xFF77818A);p.setTextSize(21);c.drawText(String.valueOf(i),px,py+7,p);}p.setTextAlign(Paint.Align.LEFT);button(c,w-76,h-48,126,64,"BACK",0x663A5877);}
+    private void pause(Canvas c,int w,int h){overlay(c);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(42);p.setColor(Color.WHITE);c.drawText("PAUSED",w/2f,h*.27f,p);button(c,w/2f,h*.50f,240,64,"RESUME",0xCC2E8DB8);button(c,w/2f,h*.63f,240,62,"RESTART",0x663A5877);button(c,w/2f,h*.76f,240,62,"LEVEL SELECT",0x663A5877);p.setTextAlign(Paint.Align.LEFT);}
+    private void win(Canvas c,int w,int h){overlay(c);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(40);p.setColor(0xFFFFD43B);c.drawText(endlessMode?"ENDLESS RUN":(level==LEVELS?"WORLD COMPLETE!":"LEVEL COMPLETE!"),w/2f,h*.26f,p);p.setTypeface(Typeface.DEFAULT);p.setColor(Color.WHITE);p.setTextSize(20);if(endlessMode)c.drawText("Best  "+bestEndless+"   Score  "+endlessScore,w/2f,h*.39f,p);else{c.drawText("Time  "+formatTime(elapsed),w/2f,h*.37f,p);c.drawText("Stars  "+starsText(),w/2f,h*.44f,p);}button(c,w/2f,h*.60f,270,66,endlessMode?"RUN AGAIN":(level<LEVELS?"NEXT LEVEL":"PLAY AGAIN"),0xCC2E8DB8);button(c,w/2f,h*.74f,270,62,"LEVEL SELECT",0x663A5877);p.setTextAlign(Paint.Align.LEFT);}
+    private void settings(Canvas c,int w,int h){p.setColor(0xFF0C2A33);c.drawRect(0,0,w,h,p);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(38);c.drawText("SETTINGS",30,60,p);p.setTypeface(Typeface.DEFAULT);p.setTextSize(20);c.drawText("Sound",38,140,p);button(c,230,130,170,58,muted?"OFF":"ON",muted?0x663A5877:0xCC2E8DB8);c.drawText("Ball skin",38,220,p);button(c,230,210,170,58,skin==0?"RED":skin==1?"PINK":"GREEN",0x663A5877);c.drawText("Lifetime stars: "+totalGems,38,295,p);c.drawText("Best endless: "+bestEndless,38,330,p);button(c,230,420,230,62,"BACK",0x663A5877);}
+    private String starsText(){int st=1;if(deaths<=3)st++;if(levelGems>=3)st++;StringBuilder b=new StringBuilder();for(int i=0;i<3;i++)b.append(i<st?'★':'☆');return b.toString();}
+    private void overlay(Canvas c){p.setColor(0xAA050B13);c.drawRect(0,0,getWidth(),getHeight(),p);}
+    private void button(Canvas c,float cx,float cy,float w,float h,String t,int col){p.setColor(col);c.drawRoundRect(cx-w/2,cy-h/2,cx+w/2,cy+h/2,20,20,p);s.setColor(0x88FFFFFF);s.setStrokeWidth(2);c.drawRoundRect(cx-w/2,cy-h/2,cx+w/2,cy+h/2,20,20,s);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextAlign(Paint.Align.CENTER);p.setTextSize(Math.min(31,h*.38f));c.drawText(t,cx,cy+h*.13f,p);p.setTextAlign(Paint.Align.LEFT);}
 
-    private void collectGems() {
-        for (Gem g : gems) if (!g.collected && hit(x, y, PLAYER_R, g.x, g.y, g.r)) {
-            g.collected = true; levelGems++; totalGems++; save(); burst(g.x, g.y, 12, 0xFFFFD166); Audio.play(Audio.COIN, muted);
-        }
-    }
+    @Override public boolean onTouchEvent(MotionEvent e){int a=e.getActionMasked();int idx=e.getActionIndex();float tx=e.getX(idx),ty=e.getY(idx);if(ui==0&&a==MotionEvent.ACTION_UP){float cx=getWidth()/2f;if(hitRect(tx,ty,cx,getHeight()*.66f,320,82)){startLevel(unlocked);return true;}if(hitRect(tx,ty,cx,getHeight()*.75f,320,78)){ui=1;return true;}if(hitRect(tx,ty,cx,getHeight()*.83f,320,78)){startEndless();return true;}if(hitRect(tx,ty,getWidth()*.85f,getHeight()*.75f,105,78)){ui=5;return true;}return true;}if(ui==1&&a==MotionEvent.ACTION_UP){float gx=getWidth()/8.5f;for(int i=1;i<=LEVELS;i++){int rr=(i-1)/8,cc=(i-1)%8;float px=54+cc*gx,py=124+rr*70;if(i<=unlocked&&hitRect(tx,ty,px,py,98,64)){startLevel(i);return true;}}if(hitRect(tx,ty,getWidth()-76,getHeight()-48,145,76)){ui=0;return true;}return true;}if(ui==5&&a==MotionEvent.ACTION_UP){if(hitRect(tx,ty,230,130,200,72)){muted=!muted;save();return true;}if(hitRect(tx,ty,230,210,200,72)){skin=(skin+1)%3;save();return true;}if(hitRect(tx,ty,230,420,260,76)){ui=0;return true;}return true;}if(ui==3&&a==MotionEvent.ACTION_UP){if(hitRect(tx,ty,getWidth()/2f,getHeight()*.50f,260,78)){ui=2;Audio.music(endlessMode?0:level,muted);return true;}if(hitRect(tx,ty,getWidth()/2f,getHeight()*.63f,260,76)){if(endlessMode)startEndless();else startLevel(level);return true;}if(hitRect(tx,ty,getWidth()/2f,getHeight()*.76f,260,76)){ui=1;Audio.stopAll();return true;}return true;}if(ui==4&&a==MotionEvent.ACTION_UP){if(hitRect(tx,ty,getWidth()/2f,getHeight()*.60f,290,82)){if(endlessMode)startEndless();else startLevel(level<LEVELS?level+1:1);return true;}if(hitRect(tx,ty,getWidth()/2f,getHeight()*.74f,290,78)){ui=1;return true;}return true;}if(ui==2){if(a==MotionEvent.ACTION_UP&&ty<100&&tx>getWidth()-145){ui=3;Audio.stopAll();return true;}handleGameplayTouch(e);return true;}return true;}
 
-    private void checkHazards() {
-        for (RectF s : spikes) if (circleRect(x, y, PLAYER_R, s)) { respawn(); return; }
-        for (RectF s : springs) if (circleRect(x, y, PLAYER_R, s) && vy >= 0) {
-            y = s.top - PLAYER_R; vy = -1280f; grounded = false; burst(x, y + PLAYER_R, 12, 0xFF78E7FF); Audio.play(Audio.SPRING, muted);
-        }
-        for (Projectile q : projectiles) if (hit(x, y, PLAYER_R, q.x, q.y, q.r)) { respawn(); return; }
-        for (Enemy e : enemies) if (hit(x, y, PLAYER_R, e.x, e.y, e.r)) { respawn(); return; }
-    }
+    private void handleGameplayTouch(MotionEvent e){int a=e.getActionMasked(),idx=e.getActionIndex(),id=e.getPointerId(idx);float tx=e.getX(idx),ty=e.getY(idx);boolean down=a==MotionEvent.ACTION_DOWN||a==MotionEvent.ACTION_POINTER_DOWN;boolean up=a==MotionEvent.ACTION_UP||a==MotionEvent.ACTION_POINTER_UP||a==MotionEvent.ACTION_CANCEL;float h=getHeight(),w=getWidth();if(down){if(inLeft(tx,ty,w,h)){leftId=id;return;}if(inRight(tx,ty,w,h)){rightId=id;return;}if(inJump(tx,ty,w,h)){jumpId=id;jumpPressed=true;return;}}if(up){if(id==leftId)leftId=-1;if(id==rightId)rightId=-1;if(id==jumpId){jumpId=-1;return;}}}
+    private boolean inLeft(float x,float y,float w,float h){return y>h-155&&x<w*.24f;}
+    private boolean inRight(float x,float y,float w,float h){return y>h-155&&x>=w*.24f&&x<w*.48f;}
+    private boolean inJump(float x,float y,float w,float h){return y>h-170&&x>w*.73f;}
+    private void clearPointers(){leftId=rightId=jumpId=-1;}
+    private boolean hitRect(float x,float y,float cx,float cy,float w,float h){return Math.abs(x-cx)<=w/2&&Math.abs(y-cy)<=h/2;}
+    private static boolean circleRect(float cx,float cy,float r,RectF q){float nx=clamp(cx,q.left,q.right),ny=clamp(cy,q.top,q.bottom),dx=cx-nx,dy=cy-ny;return dx*dx+dy*dy<=r*r;}
+    private static boolean hit(float ax,float ay,float ar,float bx,float by,float br){float dx=ax-bx,dy=ay-by,rr=ar+br;return dx*dx+dy*dy<=rr*rr;}
+    private static float clamp(float v,float a,float b){return Math.max(a,Math.min(b,v));}
+    private static int clampi(int v,int a,int b){return Math.max(a,Math.min(b,v));}
+    private static String formatTime(long ms){return String.format(Locale.US,"%02d:%02d",(ms/1000)/60,(ms/1000)%60);}
+    private void burst(float px,float py,int n,int color){for(int i=0;i<n;i++){double a=rng.nextDouble()*Math.PI*2;float sp=50+rng.nextFloat()*300;particles.add(new Particle(px,py,(float)Math.cos(a)*sp,(float)Math.sin(a)*sp-50,2+rng.nextFloat()*5,color,.35f+rng.nextFloat()*.55f));}}
+    private void save(){prefs.edit().putInt("unlocked",unlocked).putInt("gems",totalGems).putInt("best_endless",bestEndless).putInt("skin",skin).putBoolean("muted",muted).apply();}
 
-    private void updateCheckpoints() {
-        for (Checkpoint c : checkpoints) if (!c.active && Math.abs(x - c.x) < 44 && Math.abs(y - c.y) < 100) {
-            c.active = true; checkpointX = c.x; checkpointY = c.y - 58; burst(c.x, c.y - 55, 16, 0xFF7DFFB2); Audio.play(Audio.CHECK, muted);
-        }
-    }
-
-    private void updateBoss(float dt) {
-        if (!bossAlive) return;
-        if (bossHp <= 0) { bossAlive = false; burst(bossX, bossY, 48, 0xFFFFD166); Audio.play(Audio.WIN, muted); return; }
-        bossTimer += dt;
-        bossX += (x - bossX) * Math.min(1f, dt * 1.35f);
-        bossY = 590f + (float)Math.sin(bossTimer * 2.2f) * 42f;
-        if (bossTimer > 1.2f) {
-            bossTimer = 0f;
-            float dx = x - bossX, dy = y - bossY, len = Math.max(1f, (float)Math.sqrt(dx * dx + dy * dy));
-            projectiles.add(new Projectile(bossX, bossY, dx / len * 460f, dy / len * 460f, 15f));
-            Audio.play(Audio.BOSS, muted);
-        }
-        long now = SystemClock.uptimeMillis();
-        if (hit(x, y, PLAYER_R, bossX, bossY, 64f) && now - bossHitAt > 800) respawn();
-        if (vy > 0 && y + PLAYER_R < bossY + 15 && y + PLAYER_R > bossY - 45 && Math.abs(x - bossX) < 75 && now - bossHitAt > 450) {
-            bossHp -= 25f; vy = -820f; bossHitAt = now; burst(bossX, bossY, 18, 0xFFFFB347); Audio.play(Audio.COIN, muted);
-        }
-    }
-
-    private void updateParticles(float dt) {
-        for (Particle p : particles) { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 500f * dt; p.vx *= 0.985f; }
-        particles.removeIf(p -> p.life <= 0f);
-    }
-
-    private void updateEndlessScore() { endlessScore = Math.max(endlessScore, (int)((x - 260f) / 8f) + levelGems * 100); if (endlessScore > bestEndless) { bestEndless = endlessScore; save(); } }
-
-    private void ensureEndlessWorld() {
-        while (segmentCursor < x + getWidth() * 2.8f) generateEndlessSegment();
-        solids.removeIf(r -> r.right < cameraX - 900);
-        spikes.removeIf(r -> r.right < cameraX - 900);
-        springs.removeIf(r -> r.right < cameraX - 900);
-        platforms.removeIf(p -> p.x + p.w < cameraX - 900);
-        gems.removeIf(g -> g.x < cameraX - 900 || g.collected);
-        enemies.removeIf(e -> e.x < cameraX - 900);
-    }
-
-    private void generateEndlessSegment() {
-        Random r = new Random(endlessSeed + (long)(segmentCursor * 17));
-        float gap = 70f + r.nextInt(90);
-        float w = 380f + r.nextInt(330);
-        float top = 710f - r.nextInt(180);
-        float start = segmentCursor + gap;
-        solids.add(new RectF(start, top, start + w, top + 140));
-        if (r.nextFloat() < 0.62f) gems.add(new Gem(start + w * 0.5f, top - 68, r.nextInt()));
-        if (r.nextFloat() < 0.48f) spikes.add(new RectF(start + w * 0.65f, top - 25, start + w * 0.65f + 46, top + 18));
-        if (r.nextFloat() < 0.25f) springs.add(new RectF(start + w * 0.22f, top - 28, start + w * 0.22f + 70, top + 2));
-        if (r.nextFloat() < 0.42f) enemies.add(new Enemy(start + w * 0.78f, top - 30, r.nextInt(3), 90f + r.nextInt(80)));
-        if (r.nextFloat() < 0.28f) platforms.add(new Platform(start + w * 0.35f, top - 150f, 150f, 24f, 45f, 0.9f + r.nextFloat() * 0.7f, r.nextBoolean() ? 0 : 1));
-        segmentCursor = start + w;
-    }
-
-    private void finishLevel() {
-        ui = 4;
-        int stars = stars();
-        if (level < LEVELS) unlocked = Math.max(unlocked, level + 1);
-        save(); Audio.stopAll(); Audio.play(Audio.WIN, muted); burst(x, y, 40, 0xFFFFD166);
-    }
-
-    private int stars() {
-        int stars = 1;
-        if (deaths <= 3) stars++;
-        if (levelGems >= 3) stars++;
-        return Math.min(3, stars);
-    }
-
-    private void respawn() {
-        deaths++; x = checkpointX; y = checkpointY; vx = vy = 0; shake = 0.45f; projectiles.clear(); burst(x, y, 16, 0xFFFF6B6B); Audio.play(Audio.HURT, muted);
-    }
-
-    private void cameraFollow(float dt) {
-        float tx = x - getWidth() * 0.34f;
-        float ty = y - getHeight() * 0.58f;
-        cameraX += (tx - cameraX) * Math.min(1f, dt * 5f);
-        cameraY += (ty - cameraY) * Math.min(1f, dt * 5f);
-        float maxX = endlessMode ? Math.max(0f, segmentCursor - getWidth() * 0.7f) : Math.max(0f, worldW - getWidth());
-        cameraX = clamp(cameraX, 0f, maxX);
-        cameraY = clamp(cameraY, -100f, 420f);
-        shake *= 0.88f;
-    }
-
-    private void startLevel(int id) {
-        level = id; endlessMode = false; elapsedMs = 0; deaths = 0; levelGems = 0; endlessScore = 0;
-        ui = 2; bossAlive = false; cameraX = cameraY = 0; checkpointX = 260; checkpointY = 650; x = checkpointX; y = checkpointY; vx = vy = 0; shake = 0;
-        clearWorld(); buildLevel(id); Audio.music(id, muted);
-    }
-
-    private void startEndless() {
-        endlessMode = true; level = ENDLESS; elapsedMs = 0; deaths = 0; levelGems = 0; endlessScore = 0; ui = 2; bossAlive = false;
-        cameraX = cameraY = 0; checkpointX = 260; checkpointY = 650; x = checkpointX; y = checkpointY; vx = vy = 0; segmentCursor = 0; endlessSeed = (int)(System.currentTimeMillis() & 0x7fffffff);
-        clearWorld(); solids.add(new RectF(0, 820, 820, 120)); segmentCursor = 820; generateEndlessSegment(); Audio.music(0, muted);
-    }
-
-    private void clearWorld() { solids.clear(); spikes.clear(); springs.clear(); checkpoints.clear(); platforms.clear(); gems.clear(); enemies.clear(); particles.clear(); projectiles.clear(); }
-
-    private void buildLevel(int id) {
-        int world = (id - 1) / 8;
-        int variant = (id - 1) % 8;
-        currentTheme = world;
-        worldW = 6000f + world * 500f + variant * 170f;
-        float cur = 0;
-        Random r = new Random(id * 977);
-        solids.add(new RectF(0, 800, 820, 150));
-        cur = 750;
-        for (int i = 0; i < 17 + world; i++) {
-            float gap = 65f + r.nextInt(100);
-            float width = 340f + r.nextInt(290);
-            float top = 775f - (i % 3) * 55f - (variant % 3) * 10f;
-            cur += gap;
-            solids.add(new RectF(cur, top, cur + width, top + 140));
-            if (i % 2 == 0) gems.add(new Gem(cur + width * 0.45f, top - 70, i * 31));
-            if ((i + variant) % 3 == 1) spikes.add(new RectF(cur + width * 0.67f, top - 24, cur + width * 0.67f + 48, top + 18));
-            if ((i + world) % 5 == 2) springs.add(new RectF(cur + width * 0.20f, top - 27, cur + width * 0.20f + 72, top + 3));
-            if ((i + id) % 3 != 0) enemies.add(new Enemy(cur + width * 0.76f, top - 30, (i + id) % 3, 90f + (id % 5) * 12f));
-            if (i % 4 == 2) platforms.add(new Platform(cur + width * 0.32f, top - 150, 155, 24, 55 + (i % 2) * 20, 0.8f + (i % 3) * .2f, i % 2));
-            if (i == 5 || i == 11) checkpoints.add(new Checkpoint(cur + width * 0.2f, top));
-            cur += width;
-        }
-        while (cur < worldW - 500) {
-            cur += 90;
-            solids.add(new RectF(cur, 815, 470, 135));
-            if (((int)cur / 100) % 2 == 0) gems.add(new Gem(cur + 210, 740, (int)cur));
-            cur += 470;
-        }
-        solids.add(new RectF(worldW - 580, 560, worldW - 260, 610));
-        solids.add(new RectF(worldW - 260, 690, worldW, 940));
-        if (id % 8 == 0) {
-            bossAlive = true; bossX = worldW - 620; bossY = 610; bossMaxHp = 125f + world * 35f; bossHp = bossMaxHp;
-        }
-    }
-
-    private void render(Canvas c) {
-        int w = getWidth(), h = getHeight();
-        if (ui == 0) menu(c, w, h); else if (ui == 1) select(c, w, h); else if (ui == 5) settings(c, w, h); else { world(c, w, h); if (ui == 3) pause(c, w, h); if (ui == 4) win(c, w, h); }
-    }
-
-    private void world(Canvas c, int w, int h) {
-        int top = currentTheme == 1 ? 0xFF0E2134 : currentTheme == 2 ? 0xFF24143A : currentTheme == 3 ? 0xFF1A2430 : 0xFF071225;
-        int bottom = currentTheme == 1 ? 0xFF255C79 : currentTheme == 2 ? 0xFF7A3D6B : currentTheme == 3 ? 0xFF526A77 : 0xFF1B6073;
-        paint.setShader(new LinearGradient(0, 0, 0, h, top, bottom, Shader.TileMode.CLAMP)); c.drawRect(0, 0, w, h, paint); paint.setShader(null);
-        drawParallax(c, w, h, .13f, currentTheme == 2 ? 0xFF392044 : 0xFF10324A, 105);
-        drawParallax(c, w, h, .25f, currentTheme == 3 ? 0xFF364B57 : 0xFF17485C, 170);
-        c.save(); c.translate(-cameraX, -cameraY);
-        if (shake > .01f) c.translate((float)Math.sin(elapsedMs * .03) * shake * 10f, (float)Math.cos(elapsedMs * .02) * shake * 10f);
-        for (RectF r : solids) drawSolid(c, r);
-        for (Platform p : platforms) drawPlatform(c, p);
-        for (RectF r : springs) drawSpring(c, r);
-        for (RectF r : spikes) drawSpike(c, r);
-        for (Checkpoint cp : checkpoints) drawCheckpoint(c, cp);
-        for (Gem g : gems) if (!g.collected) drawGem(c, g);
-        for (Enemy e : enemies) e.draw(c);
-        for (Projectile q : projectiles) drawProjectile(c, q);
-        if (bossAlive) drawBoss(c);
-        if (!endlessMode) drawGoal(c); else drawEndlessMarker(c);
-        for (Particle q : particles) drawParticle(c, q);
-        drawBall(c);
-        c.restore();
-        drawHud(c, w, h);
-    }
-
-    private void drawParallax(Canvas c, int w, int h, float f, int color, int bh) {
-        paint.setColor(color); Path path = new Path(); float off = -(cameraX * f) % 420f; path.moveTo(0, h);
-        for (int ix = -500; ix < w + 700; ix += 140) path.lineTo(ix + off, h - bh - (float)Math.sin((ix + cameraX * f) * .012) * 35);
-        path.lineTo(w, h); path.close(); c.drawPath(path, paint);
-    }
-
-    private void drawSolid(Canvas c, RectF r) {
-        paint.setColor(0xFF17374B); c.drawRoundRect(r, 12, 12, paint);
-        paint.setColor(currentTheme == 1 ? 0xFF65A6AE : currentTheme == 2 ? 0xFFC18AE2 : 0xFF4C98A0); c.drawRoundRect(r.left, r.top, r.right, r.top + 14, 10, 10, paint);
-        paint.setColor(0x332AFFFF); c.drawRect(r.left + 8, r.top + 14, r.right - 8, r.top + 18, paint);
-    }
-
-    private void drawPlatform(Canvas c, Platform p) { paint.setColor(0xFF244F64); c.drawRoundRect(p.rect(), 10, 10, paint); paint.setColor(0xFF78D7D9); c.drawRoundRect(p.x + 6, p.y + 4, p.x + p.w - 6, p.y + 8, 4, 4, paint); }
-    private void drawSpring(Canvas c, RectF r) { paint.setColor(0xFF2B3A50); c.drawRoundRect(r, 8, 8, paint); paint.setColor(0xFF7CE7FF); c.drawRoundRect(r.left + 6, r.top + 4, r.right - 6, r.top + 10, 4, 4, paint); }
-    private void drawSpike(Canvas c, RectF r) { paint.setColor(0xFFFF6E72); Path p = new Path(); p.moveTo(r.left, r.bottom); p.lineTo(r.centerX(), r.top); p.lineTo(r.right, r.bottom); p.close(); c.drawPath(p, paint); }
-    private void drawCheckpoint(Canvas c, Checkpoint q) { paint.setColor(0xFFBCECF0); c.drawRect(q.x, q.y - 70, q.x + 4, q.y, paint); paint.setColor(q.active ? 0xFF7DFFB2 : 0xFF8198AA); Path p = new Path(); p.moveTo(q.x + 4, q.y - 70); p.lineTo(q.x + 52, q.y - 54); p.lineTo(q.x + 4, q.y - 38); p.close(); c.drawPath(p, paint); }
-    private void drawGem(Canvas c, Gem g) { float k = 1f + (float)Math.sin((elapsedMs + g.phase) * .006f) * .1f; c.save(); c.translate(g.x, g.y); c.scale(k, k); paint.setShadowLayer(16, 0, 0, 0x66FFD166); paint.setColor(0xFFFFD166); Path p = new Path(); p.moveTo(0, -g.r); p.lineTo(g.r * .8f, 0); p.lineTo(0, g.r); p.lineTo(-g.r * .8f, 0); p.close(); c.drawPath(p, paint); paint.clearShadowLayer(); paint.setColor(0xFFFFF6C8); c.drawCircle(-5, -6, 3, paint); c.restore(); }
-    private void drawGoal(Canvas c) { paint.setShadowLayer(24, 0, 0, 0x887DFFB2); paint.setColor(0xFF7DFFB2); c.drawCircle(worldW - 105, 640, 42, paint); paint.clearShadowLayer(); paint.setColor(0xFF0B1624); c.drawCircle(worldW - 105, 640, 24, paint); }
-    private void drawEndlessMarker(Canvas c) { float px = Math.max(segmentCursor - 220, x + 250); paint.setColor(0xFF7CE7FF); c.drawRoundRect(px, 570, px + 180, 600, 15, 15, paint); }
-    private void drawProjectile(Canvas c, Projectile q) { paint.setShadowLayer(14, 0, 0, 0x88FF7043); paint.setColor(0xFFFF7043); c.drawCircle(q.x, q.y, q.r, paint); paint.clearShadowLayer(); }
-    private void drawBoss(Canvas c) { paint.setShadowLayer(26, 0, 10, 0xAAFF4F5A); paint.setColor(0xFF8E3A54); c.drawCircle(bossX, bossY, 66, paint); paint.clearShadowLayer(); paint.setColor(0xFFFFB347); c.drawCircle(bossX - 18, bossY - 8, 10, paint); c.drawCircle(bossX + 18, bossY - 8, 10, paint); paint.setColor(0xFF2D1532); c.drawCircle(bossX - 18, bossY - 8, 4, paint); c.drawCircle(bossX + 18, bossY - 8, 4, paint); paint.setColor(0xFF1A2130); c.drawRoundRect(bossX - 82, bossY - 97, bossX + 82, bossY - 82, 8, 8, paint); paint.setColor(0xFF7DFFB2); c.drawRoundRect(bossX - 80, bossY - 95, bossX - 80 + 160 * (bossHp / bossMaxHp), bossY - 85, 5, 5, paint); }
-    private void drawParticle(Canvas c, Particle q) { paint.setAlpha((int)(255 * Math.max(0, q.life / q.max))); paint.setColor(q.color); c.drawCircle(q.x, q.y, q.size, paint); paint.setAlpha(255); }
-
-    private void drawBall(Canvas c) {
-        int[] colors = skin == 1 ? new int[]{Color.WHITE, 0xFFFFE0EF, 0xFFE05A93, 0xFF8F214F} : skin == 2 ? new int[]{Color.WHITE, 0xFFE8FFD0, 0xFF62C15B, 0xFF17572B} : new int[]{Color.WHITE, 0xFFE5F4FF, 0xFF3B93D0, 0xFF11517F};
-        c.save(); c.translate(x, y); paint.setShader(new RadialGradient(-10, -12, 44, colors, new float[]{0f, .12f, .65f, 1f}, Shader.TileMode.CLAMP)); paint.setShadowLayer(18, 0, 12, 0x88000000); c.drawCircle(0, 0, PLAYER_R, paint); paint.clearShadowLayer(); paint.setShader(null); paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(5); paint.setColor(0xFFB8E3FF); c.drawArc(-PLAYER_R + 5, -PLAYER_R + 5, PLAYER_R - 5, PLAYER_R - 5, vx * 12f, 150, false, paint); paint.setStyle(Paint.Style.FILL); paint.setColor(0xFFF9FDFF); c.drawCircle(-10, -11, 7, paint); c.restore();
-    }
-
-    private void drawHud(Canvas c, int w, int h) {
-        paint.setColor(0xAA071225); c.drawRoundRect(18, 16, 350, 68, 18, 18, paint); paint.setColor(Color.WHITE); paint.setTypeface(Typeface.DEFAULT_BOLD); paint.setTextSize(20); c.drawText(endlessMode ? "ENDLESS" : "LEVEL " + level, 34, 49, paint); paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(16); c.drawText("◆ " + levelGems, 165, 49, paint); if (endlessMode) c.drawText("BEST " + bestEndless, 238, 49, paint); else c.drawText(starsText(), 250, 49, paint);
-        button(c, w - 68, 42, 54, 48, "Ⅱ", 0x553A5877);
-        float cy = h - 94; button(c, 80, cy, 66, 58, "‹", 0x553A5877); button(c, 162, cy, 66, 58, "›", 0x553A5877); button(c, w - 90, cy, 78, 58, "↑", 0x557DFFB2);
-    }
-
-    private String starsText() { int s = stars(); return "★".repeat(s) + "☆".repeat(3 - s); }
-
-    private void menu(Canvas c, int w, int h) {
-        paint.setShader(new LinearGradient(0, 0, w, h, 0xFF071225, 0xFF16445F, Shader.TileMode.CLAMP)); c.drawRect(0, 0, w, h, paint); paint.setShader(null);
-        float cx = w * .5f, cy = h * .29f; drawLogo(c, cx, cy, 80); paint.setTextAlign(Paint.Align.CENTER); paint.setTypeface(Typeface.DEFAULT_BOLD); paint.setColor(Color.WHITE); paint.setTextSize(44); c.drawText("BALL", cx, cy + 132, paint); paint.setColor(0xFF7CE7FF); paint.setTextSize(38); c.drawText("PLATFORMER", cx, cy + 174, paint);
-        button(c, cx, cy + 255, 260, 62, "PLAY", 0xAA2D76A3); button(c, cx, cy + 330, 260, 58, "LEVEL SELECT", 0x553A5877); button(c, cx, cy + 400, 260, 58, "ENDLESS MODE", 0x553A5877); button(c, cx + 160, cy + 330, 78, 58, "⚙", 0x553A5877);
-        paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(13); paint.setColor(0x99FFFFFF); c.drawText("32 handcrafted-style levels • bosses • checkpoints • endless", cx, h - 22, paint); paint.setTextAlign(Paint.Align.LEFT);
-    }
-
-    private void select(Canvas c, int w, int h) {
-        paint.setColor(0xFF081526); c.drawRect(0, 0, w, h, paint); paint.setColor(Color.WHITE); paint.setTypeface(Typeface.DEFAULT_BOLD); paint.setTextSize(34); c.drawText("SELECT LEVEL", 28, 52, paint); paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(15); paint.setColor(0xAAFFFFFF); c.drawText("Unlocked " + unlocked + " / " + LEVELS, 30, 78, paint);
-        float gx = w / 8.5f; for (int i = 1; i <= LEVELS; i++) { int rr = (i - 1) / 8, cc = (i - 1) % 8; float px = 54 + cc * gx, py = 124 + rr * 70; boolean open = i <= unlocked; paint.setColor(open ? 0xFF22536A : 0xFF26313F); c.drawRoundRect(px - 39, py - 23, px + 39, py + 23, 13, 13, paint); paint.setTextAlign(Paint.Align.CENTER); paint.setColor(open ? 0xFF7CE7FF : 0xFF78818B); paint.setTextSize(20); c.drawText(String.valueOf(i), px, py + 7, paint); }
-        paint.setTextAlign(Paint.Align.LEFT); button(c, w - 70, h - 44, 110, 54, "BACK", 0x553A5877);
-    }
-
-    private void pause(Canvas c, int w, int h) {
-        overlay(c); paint.setTextAlign(Paint.Align.CENTER); paint.setTypeface(Typeface.DEFAULT_BOLD); paint.setTextSize(42); paint.setColor(Color.WHITE); c.drawText("PAUSED", w / 2f, h * .28f, paint);
-        button(c, w / 2f, h * .49f, 220, 58, "RESUME", 0xAA2D76A3); button(c, w / 2f, h * .62f, 220, 58, "RESTART", 0x553A5877); button(c, w / 2f, h * .75f, 220, 58, "LEVEL SELECT", 0x553A5877); paint.setTextAlign(Paint.Align.LEFT);
-    }
-
-    private void win(Canvas c, int w, int h) {
-        overlay(c); paint.setTextAlign(Paint.Align.CENTER); paint.setTypeface(Typeface.DEFAULT_BOLD); paint.setTextSize(42); paint.setColor(0xFFFFD166); c.drawText(endlessMode ? "ENDLESS RUN" : (level == LEVELS ? "WORLD COMPLETE!" : "LEVEL COMPLETE!"), w / 2f, h * .26f, paint);
-        paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(20); paint.setColor(Color.WHITE); if (endlessMode) c.drawText("Score  " + endlessScore, w / 2f, h * .38f, paint); else { c.drawText("Time  " + formatTime(elapsedMs), w / 2f, h * .36f, paint); c.drawText(starsText(), w / 2f, h * .43f, paint); }
-        button(c, w / 2f, h * .58f, 250, 60, endlessMode ? "RUN AGAIN" : (level < LEVELS ? "NEXT LEVEL" : "PLAY AGAIN"), 0xAA2D76A3); button(c, w / 2f, h * .71f, 250, 56, "LEVEL SELECT", 0x553A5877); paint.setTextAlign(Paint.Align.LEFT);
-    }
-
-    private void settings(Canvas c, int w, int h) {
-        paint.setColor(0xFF081526); c.drawRect(0, 0, w, h, paint); paint.setColor(Color.WHITE); paint.setTypeface(Typeface.DEFAULT_BOLD); paint.setTextSize(38); c.drawText("SETTINGS", 30, 60, paint); paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(20); c.drawText("Sound", 38, 138, paint); button(c, 230, 128, 150, 52, muted ? "OFF" : "ON", muted ? 0x553A5877 : 0xAA2D76A3); c.drawText("Ball skin", 38, 215, paint); button(c, 230, 205, 150, 52, skin == 0 ? "BLUE" : skin == 1 ? "PINK" : "GREEN", 0x553A5877); c.drawText("Lifetime gems: " + totalGems, 38, 290, paint); c.drawText("Best endless score: " + bestEndless, 38, 325, paint); button(c, 230, 410, 210, 56, "BACK", 0x553A5877);
-    }
-
-    private void overlay(Canvas c) { paint.setColor(0xAA050B13); c.drawRect(0, 0, getWidth(), getHeight(), paint); }
-
-    private void button(Canvas c, float cx, float cy, float w, float h, String text, int color) { paint.setColor(color); c.drawRoundRect(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, 18, 18, paint); stroke.setColor(0x66FFFFFF); stroke.setStrokeWidth(2); c.drawRoundRect(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, 18, 18, stroke); paint.setColor(Color.WHITE); paint.setTypeface(Typeface.DEFAULT_BOLD); paint.setTextAlign(Paint.Align.CENTER); paint.setTextSize(h * .38f); c.drawText(text, cx, cy + h * .13f, paint); paint.setTextAlign(Paint.Align.LEFT); }
-
-    private void drawLogo(Canvas c, float x, float y, float r) { paint.setShader(new RadialGradient(x - 18, y - 22, r, new int[]{Color.WHITE, 0xFFBFE9FF, 0xFF4A9DD7, 0xFF0E4771}, new float[]{0f, .1f, .64f, 1f}, Shader.TileMode.CLAMP)); c.drawCircle(x, y, r, paint); paint.setShader(null); paint.setColor(0xFF193B55); c.drawCircle(x - 18, y - 20, 9, paint); c.drawCircle(x + 18, y - 20, 9, paint); }
-
-    @Override public boolean onTouchEvent(MotionEvent e) {
-        float tx = e.getX(), ty = e.getY(); int action = e.getActionMasked(); boolean down = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_POINTER_DOWN; boolean up = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_POINTER_UP;
-        if (ui == 0 && action == MotionEvent.ACTION_UP) {
-            float cy = getHeight() * .29f, cx = getWidth() / 2f;
-            if (hitRect(tx, ty, cx, cy + 255, 280, 72)) { startLevel(unlocked); return true; }
-            if (hitRect(tx, ty, cx, cy + 330, 280, 70)) { ui = 1; return true; }
-            if (hitRect(tx, ty, cx, cy + 400, 280, 70)) { startEndless(); return true; }
-            if (hitRect(tx, ty, cx + 160, cy + 330, 100, 70)) { ui = 5; return true; }
-            return true;
-        }
-        if (ui == 1 && action == MotionEvent.ACTION_UP) {
-            float gx = getWidth() / 8.5f;
-            for (int i = 1; i <= LEVELS; i++) { int rr = (i - 1) / 8, cc = (i - 1) % 8; float px = 54 + cc * gx, py = 124 + rr * 70; if (i <= unlocked && hitRect(tx, ty, px, py, 92, 58)) { startLevel(i); return true; } }
-            if (hitRect(tx, ty, getWidth() - 70, getHeight() - 44, 125, 70)) { ui = 0; return true; }
-            return true;
-        }
-        if (ui == 5 && action == MotionEvent.ACTION_UP) {
-            if (hitRect(tx, ty, 230, 128, 180, 68)) { muted = !muted; save(); return true; }
-            if (hitRect(tx, ty, 230, 205, 180, 68)) { skin = (skin + 1) % 3; save(); return true; }
-            if (hitRect(tx, ty, 230, 410, 240, 70)) { ui = 0; return true; }
-            return true;
-        }
-        if (ui == 3 && action == MotionEvent.ACTION_UP) {
-            if (hitRect(tx, ty, getWidth() / 2f, getHeight() * .49f, 250, 72)) { ui = 2; Audio.music(endlessMode ? 0 : level, muted); return true; }
-            if (hitRect(tx, ty, getWidth() / 2f, getHeight() * .62f, 250, 72)) { if (endlessMode) startEndless(); else startLevel(level); return true; }
-            if (hitRect(tx, ty, getWidth() / 2f, getHeight() * .75f, 250, 72)) { ui = 1; Audio.stopAll(); return true; }
-            return true;
-        }
-        if (ui == 4 && action == MotionEvent.ACTION_UP) {
-            if (hitRect(tx, ty, getWidth() / 2f, getHeight() * .58f, 270, 74)) { if (endlessMode) startEndless(); else startLevel(level < LEVELS ? level + 1 : 1); return true; }
-            if (hitRect(tx, ty, getWidth() / 2f, getHeight() * .71f, 270, 70)) { ui = 1; return true; }
-            return true;
-        }
-        if (ui == 2) {
-            if (ty < 95 && tx > getWidth() - 130 && action == MotionEvent.ACTION_UP) { ui = 3; Audio.stopAll(); return true; }
-            if (ty > getHeight() - 175) {
-                if (tx < 125) left = down;
-                else if (tx < 260) right = down;
-                else if (tx > getWidth() - 170) { if (down) jumpPressed = true; jumpHeld = down; }
-                if (up && tx < 125) left = false;
-                if (up && tx >= 125 && tx < 260) right = false;
-                if (up && tx > getWidth() - 170) jumpHeld = false;
-            }
-            return true;
-        }
-        return true;
-    }
-
-    private boolean hitRect(float x, float y, float cx, float cy, float w, float h) { return Math.abs(x - cx) <= w / 2f && Math.abs(y - cy) <= h / 2f; }
-    private static boolean circleRect(float cx, float cy, float r, RectF q) { float nx = clamp(cx, q.left, q.right), ny = clamp(cy, q.top, q.bottom); float dx = cx - nx, dy = cy - ny; return dx * dx + dy * dy <= r * r; }
-    private static boolean hit(float ax, float ay, float ar, float bx, float by, float br) { float dx = ax - bx, dy = ay - by, rr = ar + br; return dx * dx + dy * dy <= rr * rr; }
-    private static float clamp(float v, float a, float b) { return Math.max(a, Math.min(b, v)); }
-    private static int clampInt(int v, int a, int b) { return Math.max(a, Math.min(b, v)); }
-    private static String formatTime(long ms) { return String.format(Locale.US, "%02d:%02d", (ms / 1000) / 60, (ms / 1000) % 60); }
-    private void burst(float px, float py, int count, int color) { for (int i = 0; i < count; i++) { double a = rng.nextDouble() * Math.PI * 2; float sp = 50f + rng.nextFloat() * 290f; particles.add(new Particle(px, py, (float)Math.cos(a) * sp, (float)Math.sin(a) * sp - 50f, 2f + rng.nextFloat() * 5f, color, .35f + rng.nextFloat() * .55f)); } }
-    private void save() { prefs.edit().putInt("unlocked", unlocked).putInt("gems", totalGems).putInt("best_endless", bestEndless).putInt("skin", skin).putBoolean("muted", muted).apply(); }
-
-    private static final class Gem { final float x, y, r = 17f; final int phase; boolean collected; Gem(float x, float y, int phase) { this.x = x; this.y = y; this.phase = phase; } }
-    private static final class Checkpoint { final float x, y; boolean active; Checkpoint(float x, float y) { this.x = x; this.y = y; } }
-    private static final class Particle { float x, y, vx, vy, size, life, max; final int color; Particle(float x, float y, float vx, float vy, float size, int color, float life) { this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.size=size;this.color=color;this.life=life;this.max=life; } }
-    private static final class Projectile { float x,y,vx,vy,r,life=5f; Projectile(float x,float y,float vx,float vy,float r){this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.r=r;} }
-    private static final class Platform { final float baseX,baseY,w,h,range,speed; float x,y,t,dx,dy; final int axis; Platform(float x,float y,float w,float h,float range,float speed,int axis){baseX=this.x=x;baseY=this.y=y;this.w=w;this.h=h;this.range=range;this.speed=speed;this.axis=axis;} RectF rect(){return new RectF(x,y,x+w,y+h);} }
-    private final class Enemy { float x,y,baseY,speed,t; final float min,max,r=26f; final int type; int dir=1; Enemy(float x,float y,int type,float speed){this.x=x;this.y=y;baseY=y;this.type=type;this.speed=speed;min=x-120;max=x+120;} void update(float dt){t+=dt;if(type==0){x+=dir*speed*dt;if(x<min||x>max)dir*=-1;} else if(type==1){x+=(float)Math.sin(t*2.4)*speed*.45f*dt;y=baseY+(float)Math.sin(t*3.1)*42f;} else {x+=dir*speed*dt;y=baseY-(float)Math.abs(Math.sin(t*2.8))*36f;if(x<min||x>max)dir*=-1;}} void draw(Canvas c){paint.setColor(type==0?0xFFFF6B6B:type==1?0xFF9E8CFF:0xFFFF9D4D);c.drawCircle(x,y,r,paint);paint.setColor(Color.WHITE);c.drawCircle(x-7,y-6,4,paint);c.drawCircle(x+7,y-6,4,paint);paint.setColor(0xFF1B2230);c.drawCircle(x-7+dir*2,y-6,2,paint);c.drawCircle(x+7+dir*2,y-6,2,paint);}}
-
-    private static final class Audio {
-        static final int JUMP=1, COIN=2, HURT=3, WIN=4, SPRING=5, CHECK=6, BOSS=7;
-        private static final int RATE=22050;
-        private static volatile Thread musicThread;
-        private static volatile boolean musicRunning;
-        static void play(int type, boolean muted) { if (muted) return; float f=type==JUMP?660:type==COIN?960:type==HURT?180:type==WIN?780:type==SPRING?520:type==CHECK?880:240; float d=type==WIN?.45f:.11f; new Thread(() -> tone(f,d,type==HURT?.20f:.14f), "sfx").start(); }
-        static void music(int level, boolean muted) { stopAll(); if (muted) return; musicRunning=true; musicThread=new Thread(() -> { float base=level%8==0?196f:level%5==0?233f:261.6f; float[] notes={base,base*1.25f,base*1.5f,base*2f,base*1.5f,base*1.25f,base*1.12f,base*1.5f}; while(musicRunning){for(float n:notes){if(!musicRunning)break;tone(n,.10f,.028f);}} }, "music"); musicThread.start(); }
-        static void stopAll(){musicRunning=false;if(musicThread!=null){musicThread.interrupt();musicThread=null;}}
-        private static void tone(float f,float d,float vol){int samples=(int)(RATE*d);short[] data=new short[samples];for(int i=0;i<samples;i++){float t=i/(float)RATE;float env=Math.min(1f,t*30f)*Math.min(1f,(d-t)*16f);data[i]=(short)(Math.sin(6.2831853f*f*t)*32767f*vol*env);}AudioTrack track=null;try{track=new AudioTrack(AudioManager.STREAM_MUSIC,RATE,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT,Math.max(256,samples*2),AudioTrack.MODE_STATIC);track.write(data,0,data.length);track.play();Thread.sleep((long)(d*1000)+18);}catch(Exception ignored){}finally{if(track!=null){try{track.stop();}catch(Exception ignored){}track.release();}}}
-    }
+    private static final class Gem{final float x,y,r=17;final int phase;boolean got;Gem(float x,float y,int phase){this.x=x;this.y=y;this.phase=phase;}}
+    private static final class Checkpoint{final float x,y;boolean active;Checkpoint(float x,float y){this.x=x;this.y=y;}}
+    private static final class Particle{float x,y,vx,vy,size,life,max;final int color;Particle(float x,float y,float vx,float vy,float size,int color,float life){this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.size=size;this.color=color;this.life=life;this.max=life;}}
+    private static final class Shot{float x,y,vx,vy,r,life=5;Shot(float x,float y,float vx,float vy,float r){this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.r=r;}}
+    private static final class Platform{final float bx,by,w,h,range,speed;float x,y,t,dx,dy;final int axis;Platform(float x,float y,float w,float h,float range,float speed,int axis){bx=this.x=x;by=this.y=y;this.w=w;this.h=h;this.range=range;this.speed=speed;this.axis=axis;}RectF rect(){return new RectF(x,y,x+w,y+h);}}
+    private static final class Enemy{float x,y,baseY,speed,t,hitAt;final float min,max,size=42;final int type;int dir=1;boolean alive=true;Enemy(float x,float y,int type,float speed){this.x=x;this.y=y;this.baseY=y;this.type=type;this.speed=speed;min=x-125;max=x+125;}void update(float dt){t+=dt;if(type==0){x+=dir*speed*dt;}else if(type==1){x+=(float)Math.sin(t*2.2)*speed*.55f*dt;y=baseY+(float)Math.sin(t*3.2)*42;}else{x+=dir*speed*dt;y=baseY-(float)Math.abs(Math.sin(t*2.8))*40;}if(x<min||x>max)dir*=-1;}void draw(Canvas c){float z=size/2;p.setShadowLayer(10,0,7,0x66000000);p.setColor(0xFF414A53);c.drawRoundRect(x-z,y-z,x+z,y+z,7,7,p);p.clearShadowLayer();p.setColor(0xFF273038);c.drawRect(x-z+5,y+z-10,x+z-5,y+z-5,p);p.setColor(0xFFFFC857);c.drawCircle(x-10,y-7,8,p);c.drawCircle(x+10,y-7,8,p);p.setColor(Color.BLACK);c.drawCircle(x-10+dir*2,y-7,3,p);c.drawCircle(x+10+dir*2,y-7,3,p);p.setColor(0xFF2A1A1E);c.drawRoundRect(x-17,y+5,x+17,y+18,5,5,p);p.setColor(0xFFFFFFFF);for(int i=0;i<5;i++)c.drawRect(x-13+i*6,y+7,x-10+i*6,y+13,p);}}
+    private static final class Audio{static final int JUMP=1,COIN=2,HURT=3,WIN=4,SPRING=5,CHECK=6,BOSS=7;static final int RATE=22050;static volatile boolean musicRun;static Thread musicThread;static void play(int t,boolean mute){if(mute)return;float f=t==JUMP?700:t==COIN?980:t==HURT?180:t==WIN?760:t==SPRING?520:t==CHECK?880:240;float d=t==WIN?.4f:.11f;new Thread(()->tone(f,d,t==HURT?.22f:.15f)).start();}static void tone(float f,float d,float vol){int n=(int)(RATE*d);short[] a=new short[n];for(int i=0;i<n;i++){float z=i/(float)RATE,e=Math.min(1,z*30)*Math.min(1,(d-z)*15);a[i]=(short)(Math.sin(6.28318*f*z)*32767*vol*e);}AudioTrack q=new AudioTrack(AudioManager.STREAM_MUSIC,RATE,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT,n*2,AudioTrack.MODE_STATIC);q.write(a,0,a.length);q.play();try{Thread.sleep((long)(d*1000)+20);}catch(Exception ignored){}q.release();}static void music(int lv,boolean mute){stopAll();if(mute)return;musicRun=true;musicThread=new Thread(()->{float[] ns={261.6f,329.6f,392f,523.3f,392f,329.6f,293.7f,349.2f};while(musicRun)for(float f:ns){if(!musicRun)break;tone(f,.12f,.032f);}});musicThread.start();}static void stopAll(){musicRun=false;if(musicThread!=null)musicThread.interrupt();musicThread=null;}}
 }
