@@ -3,103 +3,1142 @@ package com.pmdgaming5.ballplatformer;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.*;
-import android.media.*;
-import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.Locale;
+import java.util.Random;
 
 public final class GameView extends View {
-    private static final int LEVELS=32, ENDLESS=33;
-    private static final float R=30f;
-    private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG), s=new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final int LEVELS = 32;
+    private static final int ENDLESS = 33;
+    private static final float BALL_R = 30f;
+
+    private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final SharedPreferences prefs;
-    private final ArrayList<RectF> solids=new ArrayList<>(), spikes=new ArrayList<>(), springs=new ArrayList<>();
-    private final ArrayList<Checkpoint> checkpoints=new ArrayList<>(), gems=new ArrayList<>(), particles=new ArrayList<>(), shots=new ArrayList<>();
-    private final ArrayList<Platform> platforms=new ArrayList<>(), enemies=new ArrayList<>();
-    private int ui=0,level=1,unlocked,totalGems,levelGems,deaths,bestEndless,endlessScore,skin,theme;
-    private boolean muted,endlessMode,bossAlive,lifecyclePaused,grounded,jumpPressed;
-    private float x=260,y=650,vx,vy,cameraX,cameraY,worldW,checkpointX=260,checkpointY=650;
-    private float bossX,bossY,bossHp,bossMaxHp,bossTimer,segmentCursor,shake;
-    private int endlessSeed,leftId=-1,rightId=-1,jumpId=-1;
-    private long groundedAt,jumpUntil,elapsed,lastNs,bossHitAt;
-    private final Random rng=new Random(12345);
 
-    public GameView(Context c){super(c);prefs=c.getSharedPreferences("ball_platformer",Context.MODE_PRIVATE);unlocked=clampi(prefs.getInt("unlocked",1),1,LEVELS);totalGems=Math.max(0,prefs.getInt("gems",0));bestEndless=Math.max(0,prefs.getInt("best_endless",0));skin=clampi(prefs.getInt("skin",0),0,2);muted=prefs.getBoolean("muted",false);s.setStyle(Paint.Style.STROKE);setFocusable(true);setLayerType(View.LAYER_TYPE_HARDWARE,null);lastNs=System.nanoTime();}
-    public void resumeGame(){lifecyclePaused=false;lastNs=System.nanoTime();invalidate();}
-    public void pauseForLifecycle(){lifecyclePaused=true;Audio.stopAll();clearPointers();}
-    @Override protected void onDraw(Canvas c){long n=System.nanoTime();float dt=Math.min(.033f,Math.max(0,(n-lastNs)/1_000_000_000f));lastNs=n;if(!lifecyclePaused&&ui==2)update(dt);render(c);postInvalidateOnAnimation();}
+    private final ArrayList<RectF> solids = new ArrayList<>();
+    private final ArrayList<RectF> spikes = new ArrayList<>();
+    private final ArrayList<RectF> springs = new ArrayList<>();
+    private final ArrayList<Checkpoint> checkpoints = new ArrayList<>();
+    private final ArrayList<Gem> gems = new ArrayList<>();
+    private final ArrayList<Particle> particles = new ArrayList<>();
+    private final ArrayList<Projectile> projectiles = new ArrayList<>();
+    private final ArrayList<Platform> platforms = new ArrayList<>();
+    private final ArrayList<Enemy> enemies = new ArrayList<>();
 
-    private void update(float dt){elapsed+=(long)(dt*1000);updatePlatforms(dt);if(endlessMode)ensureEndless();move(dt);for(Enemy e:enemies)if(e.alive)e.update(dt);for(Shot q:shots){q.x+=q.vx*dt;q.y+=q.vy*dt;q.vy+=520*dt;q.life-=dt;}shots.removeIf(q->q.life<=0||q.x<cameraX-700||q.x>cameraX+getWidth()+900);collect();hazards();checkpoints();boss(dt);for(Particle q:particles){q.life-=dt;q.x+=q.vx*dt;q.y+=q.vy*dt;q.vy+=520*dt;q.vx*=.985f;}particles.removeIf(q->q.life<=0);if(!endlessMode&&!bossAlive&&x>worldW-180)finish();if(endlessMode)endlessScore=Math.max(endlessScore,(int)((x-260)/7)+levelGems*100);if(endlessScore>bestEndless){bestEndless=endlessScore;save();}camera(dt);}
+    private final Random particlesRandom = new Random(1337);
 
-    private void move(float dt){boolean L=leftId>=0,Rr=rightId>=0; if(L)vx-=1750*dt;if(Rr)vx+=1750*dt;if(!L&&!Rr)vx*=Math.pow(.0012,dt);vx=clamp(vx,-690,690);long now=SystemClock.uptimeMillis();if(jumpPressed){jumpUntil=now+150;jumpPressed=false;}if(now<=jumpUntil&&(grounded||now-groundedAt<130)){vy=-1020;grounded=false;jumpUntil=0;burst(x,y+R,10,0xFFBDEBFF);Audio.play(Audio.JUMP,muted);}if(jumpId<0&&vy<-420)vy+=1700*dt;vy+=2450*dt;vy=clamp(vy,-1180,1500);float ox=x,oy=y;x+=vx*dt;y+=vy*dt;grounded=false;for(RectF q:solids)resolve(q,ox,oy);for(Platform m:platforms){RectF q=m.rect();if(circleRect(x,y,R,q)&&oy+R<=q.top+8&&y+R>=q.top){y=q.top-R;vy=0;grounded=true;groundedAt=now;x+=m.dx;y+=m.dy;}}if(y>1400)respawn();}
-    private void resolve(RectF q,float ox,float oy){if(!circleRect(x,y,R,q))return;if(ox+R<=q.left&&x+R>q.left){x=q.left-R;vx=-Math.abs(vx)*.12f;}else if(ox-R>=q.right&&x-R<q.right){x=q.right+R;vx=Math.abs(vx)*.12f;}else if(oy+R<=q.top&&y+R>q.top){y=q.top-R;vy=0;grounded=true;groundedAt=SystemClock.uptimeMillis();}else if(oy-R>=q.bottom&&y-R<q.bottom){y=q.bottom+R;vy=Math.max(0,vy);}}
-    private void updatePlatforms(float dt){for(Platform m:platforms){float ox=m.x,oy=m.y;m.t+=dt*m.speed;float z=(float)Math.sin(m.t)*m.range;if(m.axis==0)m.x=m.bx+z;else m.y=m.by+z;m.dx=m.x-ox;m.dy=m.y-oy;}}
+    private int ui = 0;
+    private int level = 1;
+    private int unlocked;
+    private int totalGems;
+    private int levelGems;
+    private int deaths;
+    private int skin;
+    private int bestEndless;
+    private int endlessScore;
+    private int theme;
+    private boolean muted;
+    private boolean endlessMode;
+    private boolean bossAlive;
+    private boolean lifecyclePaused;
 
-    private void collect(){for(Gem g:gems)if(!g.got&&hit(x,y,R,g.x,g.y,g.r)){g.got=true;levelGems++;totalGems++;save();burst(g.x,g.y,12,0xFFFFD54A);Audio.play(Audio.COIN,muted);}}
-    private void hazards(){for(RectF q:spikes)if(circleRect(x,y,R,q)){respawn();return;}for(RectF q:springs)if(circleRect(x,y,R,q)&&vy>=0){y=q.top-R;vy=-1320;grounded=false;burst(x,y+R,14,0xFF74E7FF);Audio.play(Audio.SPRING,muted);}for(Shot q:shots)if(hit(x,y,R,q.x,q.y,q.r)){respawn();return;}for(Enemy e:enemies)if(e.alive&&hit(x,y,R,e.x,e.y,e.size*.72f)){long now=SystemClock.uptimeMillis();boolean stomp=vy>0&&y+R<e.y+e.size*.35f&&Math.abs(x-e.x)<e.size*.9f;if(stomp&&now-e.hitAt>250){e.alive=false;vy=-900;burst(e.x,e.y,18,0xFFFFC04A);Audio.play(Audio.COIN,muted);}else if(now-e.hitAt>500){e.hitAt=now;respawn();return;}}}
-    private void checkpoints(){for(Checkpoint q:checkpoints)if(!q.active&&Math.abs(x-q.x)<48&&Math.abs(y-q.y)<110){q.active=true;checkpointX=q.x;checkpointY=q.y-60;burst(q.x,q.y-58,16,0xFF7DFFB2);Audio.play(Audio.CHECK,muted);}}
+    private int leftPointer = -1;
+    private int rightPointer = -1;
+    private int jumpPointer = -1;
 
-    private void boss(float dt){if(!bossAlive)return;if(bossHp<=0){bossAlive=false;burst(bossX,bossY,55,0xFFFFD166);Audio.play(Audio.WIN,muted);return;}bossTimer+=dt;bossX+=(x-bossX)*Math.min(1,dt*1.15f);bossY=600+(float)Math.sin(bossTimer*2.1)*36;if(bossTimer>1.15){bossTimer=0;float dx=x-bossX,dy=y-bossY,len=Math.max(1,(float)Math.hypot(dx,dy));shots.add(new Shot(bossX,bossY,dx/len*430,dy/len*430,15));Audio.play(Audio.BOSS,muted);}long now=SystemClock.uptimeMillis();if(hit(x,y,R,bossX,bossY,72)&&now-bossHitAt>700)respawn();if(vy>0&&y+R<bossY+22&&y+R>bossY-50&&Math.abs(x-bossX)<82&&now-bossHitAt>450){bossHp-=25;bossHitAt=now;vy=-850;burst(bossX,bossY,20,0xFFFFA95A);Audio.play(Audio.COIN,muted);}}
-    private void respawn(){deaths++;x=checkpointX;y=checkpointY;vx=vy=0;shake=.55f;shots.clear();burst(x,y,18,0xFFFF6B6B);Audio.play(Audio.HURT,muted);}
-    private void finish(){ui=4;if(level<LEVELS)unlocked=Math.max(unlocked,level+1);save();Audio.stopAll();Audio.play(Audio.WIN,muted);burst(x,y,42,0xFFFFD166);}
+    private boolean jumpQueued;
+    private boolean grounded;
+    private long groundedAt;
+    private long jumpQueueUntil;
+    private long elapsedMs;
+    private long lastNs;
+    private long bossHitAt;
 
-    private void ensureEndless(){while(segmentCursor<x+getWidth()*3)genSegment();float cut=cameraX-1000;solids.removeIf(q->q.right<cut);spikes.removeIf(q->q.right<cut);springs.removeIf(q->q.right<cut);platforms.removeIf(q->q.x+q.w<cut);gems.removeIf(q->q.x<cut);enemies.removeIf(q->q.x<cut);}
-    private void genSegment(){Random r=new Random(endlessSeed+(long)(segmentCursor*31));float gap=65+r.nextInt(95),w=390+r.nextInt(330),top=720-r.nextInt(180),st=segmentCursor+gap;solids.add(new RectF(st,top,st+w,top+145));if(r.nextFloat()<.70)gems.add(new Gem(st+w*.46f,top-72,r.nextInt()));if(r.nextFloat()<.45)spikes.add(new RectF(st+w*.64f,top-24,st+w*.64f+48,top+18));if(r.nextFloat()<.22)springs.add(new RectF(st+w*.2f,top-27,st+w*.2f+72,top+3));if(r.nextFloat()<.48)enemies.add(new Enemy(st+w*.76f,top-32,r.nextInt(3),95+r.nextInt(70)));if(r.nextFloat()<.30)platforms.add(new Platform(st+w*.34f,top-155,160,25,45+r.nextInt(45),.8f+r.nextFloat()*.8f,r.nextBoolean()?0:1));segmentCursor=st+w;}
+    private float x = 260f;
+    private float y = 650f;
+    private float vx;
+    private float vy;
+    private float cameraX;
+    private float cameraY;
+    private float worldW;
+    private float checkpointX = 260f;
+    private float checkpointY = 650f;
+    private float bossX;
+    private float bossY;
+    private float bossHp;
+    private float bossMaxHp;
+    private float bossTimer;
+    private float segmentCursor;
+    private float cameraShake;
+    private int endlessSeed;
 
-    private void startLevel(int id){level=id;endlessMode=false;elapsed=deaths=levelGems=endlessScore=0;bossAlive=false;cameraX=cameraY=0;checkpointX=260;checkpointY=650;x=260;y=650;vx=vy=0;clear();build(id);ui=2;Audio.music(id,muted);}
-    private void startEndless(){level=ENDLESS;endlessMode=true;elapsed=deaths=levelGems=endlessScore=0;bossAlive=false;cameraX=cameraY=0;checkpointX=260;checkpointY=650;x=260;y=650;vx=vy=0;segmentCursor=820;endlessSeed=(int)(System.currentTimeMillis()&0x7fffffff);clear();solids.add(new RectF(0,820,820,145));genSegment();ui=2;Audio.music(0,muted);}
-    private void clear(){solids.clear();spikes.clear();springs.clear();checkpoints.clear();platforms.clear();gems.clear();enemies.clear();particles.clear();shots.clear();}
-    private void build(int id){int world=(id-1)/8,var=(id-1)%8;theme=world;worldW=5900+world*520+var*190;Random r=new Random(id*997);float cur=0;solids.add(new RectF(0,805,820,150));cur=740;for(int i=0;i<18+world;i++){float gap=55+r.nextInt(95),w=360+r.nextInt(300),top=775-(i%3)*55-(var%2)*12;cur+=gap;solids.add(new RectF(cur,top,cur+w,top+145));if(i%2==0)gems.add(new Gem(cur+w*.45f,top-70,i*41));if((i+var)%3==1)spikes.add(new RectF(cur+w*.66f,top-24,cur+w*.66f+48,top+18));if((i+world)%5==2)springs.add(new RectF(cur+w*.2f,top-27,cur+w*.2f+72,top+3));if((i+id)%3!=0)enemies.add(new Enemy(cur+w*.77f,top-32,(i+id)%3,90+(id%5)*14));if(i%4==2)platforms.add(new Platform(cur+w*.32f,top-150,155,24,55+(i%2)*20,.8f+(i%3)*.2f,i%2));if(i==5||i==11)checkpoints.add(new Checkpoint(cur+w*.2f,top));cur+=w;}while(cur<worldW-500){cur+=80;solids.add(new RectF(cur,820,480,140));if(((int)cur/100)%2==0)gems.add(new Gem(cur+215,742,(int)cur));cur+=480;}solids.add(new RectF(worldW-590,560,worldW-270,615));solids.add(new RectF(worldW-270,690,worldW,950));if(id%8==0){bossAlive=true;bossX=worldW-640;bossY=600;bossMaxHp=130+world*40;bossHp=bossMaxHp;}}
+    public GameView(Context context) {
+        super(context);
+        prefs = context.getSharedPreferences("ball_platformer", Context.MODE_PRIVATE);
+        unlocked = clampInt(prefs.getInt("unlocked", 1), 1, LEVELS);
+        totalGems = Math.max(0, prefs.getInt("gems", 0));
+        bestEndless = Math.max(0, prefs.getInt("best_endless", 0));
+        skin = clampInt(prefs.getInt("skin", 0), 0, 2);
+        muted = prefs.getBoolean("muted", false);
+        stroke.setStyle(Paint.Style.STROKE);
+        setFocusable(true);
+        setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        lastNs = System.nanoTime();
+    }
 
-    private void render(Canvas c){int w=getWidth(),h=getHeight();if(ui==0)menu(c,w,h);else if(ui==1)select(c,w,h);else if(ui==5)settings(c,w,h);else{world(c,w,h);if(ui==3)pause(c,w,h);if(ui==4)win(c,w,h);}}
-    private void world(Canvas c,int w,int h){int top=theme==0?0xFF72D7FF:theme==1?0xFF223B62:theme==2?0xFF45305E:0xFF293844;int bot=theme==0?0xFFB8F28B:theme==1?0xFF6A4F3D:theme==2?0xFF182439:0xFF626E74;p.setShader(new LinearGradient(0,0,0,h,top,bot,Shader.TileMode.CLAMP));c.drawRect(0,0,w,h,p);p.setShader(null);drawSky(c,w,h);c.save();c.translate(-cameraX,-cameraY);if(shake>.01)c.translate((float)Math.sin(elapsed*.03)*shake*10,(float)Math.cos(elapsed*.02)*shake*10);for(RectF q:solids)drawGround(c,q);for(Platform m:platforms)drawPlatform(c,m);for(RectF q:springs)drawSpring(c,q);for(RectF q:spikes)drawSpike(c,q);for(Checkpoint q:checkpoints)drawFlag(c,q);for(Gem q:gems)if(!q.got)drawStar(c,q);for(Enemy e:enemies)if(e.alive)e.draw(c);for(Shot q:shots)drawShot(c,q);if(bossAlive)drawBoss(c);if(!endlessMode)drawGoal(c);for(Particle q:particles)drawParticle(c,q);drawBall(c);c.restore();hud(c,w,h);controls(c,w,h);}
-    private void drawSky(Canvas c,int w,int h){if(theme!=0)return;p.setColor(0x66FFFFFF);for(int i=0;i<5;i++){float cx=(i*260+80)-(cameraX*.08f%1300),cy=95+(i%2)*58;c.drawOval(cx,cy,cx+130,cy+38,p);c.drawOval(cx+45,cy-18,cx+175,cy+38,p);}p.setColor(0xFFFFE37A);c.drawCircle(w-100,95,42,p);}
-    private void drawGround(Canvas c,RectF q){p.setColor(theme==0?0xFF6A421F:theme==1?0xFF66503C:theme==2?0xFF283040:0xFF49535A);c.drawRoundRect(q,12,12,p);p.setColor(theme==0?0xFF72C83E:theme==1?0xFF7A9B61:0xFF5C6871);c.drawRoundRect(q.left,q.top,q.right,q.top+18,10,10,p);if(theme==0){p.setColor(0xFF3C9D2B);for(int i=(int)q.left;i<q.right;i+=34){Path z=new Path();z.moveTo(i,q.top+18);z.lineTo(i+8,q.top+4);z.lineTo(i+14,q.top+18);z.close();c.drawPath(z,p);}}p.setColor(0x33301000);for(int i=(int)q.left+30;i<q.right;i+=90)c.drawCircle(i,q.top+58,10,p);}
-    private void drawPlatform(Canvas c,Platform m){p.setColor(0xFFB98B5B);c.drawRoundRect(m.rect(),8,8,p);p.setColor(0xFF7D5939);c.drawCircle(m.x+25,m.y+12,3,p);c.drawCircle(m.x+m.w-30,m.y+12,3,p);}
-    private void drawSpring(Canvas c,RectF q){p.setColor(0xFF536A72);c.drawRoundRect(q,7,7,p);p.setColor(0xFF5DE0FF);c.drawRect(q.left+5,q.top+4,q.right-5,q.top+9,p);}
-    private void drawSpike(Canvas c,RectF q){p.setColor(0xFFE9EDF0);Path z=new Path();z.moveTo(q.left,q.bottom);for(int i=0;i<3;i++){float a=q.left+(i+.5f)*(q.width()/3f);z.lineTo(a,q.top);z.lineTo(q.left+(i+1)*(q.width()/3f),q.bottom);}z.close();c.drawPath(z,p);p.setColor(0xFF6C737A);c.drawRect(q.left,q.bottom-5,q.right,q.bottom,p);}
-    private void drawFlag(Canvas c,Checkpoint q){p.setColor(0xFF6B523B);c.drawRect(q.x,q.y-78,q.x+5,q.y,p);p.setColor(q.active?0xFF57E37D:0xFFFF5B5B);Path z=new Path();z.moveTo(q.x+5,q.y-76);z.lineTo(q.x+58,q.y-60);z.lineTo(q.x+5,q.y-44);z.close();c.drawPath(z,p);}
-    private void drawStar(Canvas c,Gem g){c.save();c.translate(g.x,g.y);float sc=1+(float)Math.sin((elapsed+g.phase)*.006)*.08f;c.scale(sc,sc);p.setShadowLayer(14,0,0,0x99FFD43B);p.setColor(0xFFFFD43B);Path z=new Path();for(int i=0;i<10;i++){double a=-Math.PI/2+i*Math.PI/5;float rr=i%2==0?18:8;float px=(float)Math.cos(a)*rr,py=(float)Math.sin(a)*rr;if(i==0)z.moveTo(px,py);else z.lineTo(px,py);}z.close();c.drawPath(z,p);p.clearShadowLayer();p.setColor(Color.WHITE);c.drawCircle(-5,-5,3,p);c.restore();}
-    private void drawBall(Canvas c){c.save();c.translate(x,y);int base=skin==0?0xFFD63B45:skin==1?0xFFE95BA5:0xFF5FD06A;p.setShader(new RadialGradient(-11,-13,R,new int[]{Color.WHITE,base,base,0xFF6A1620},new float[]{0,.12f,.63f,1},Shader.TileMode.CLAMP));p.setShadowLayer(15,0,10,0x88000000);c.drawCircle(0,0,R,p);p.clearShadowLayer();p.setShader(null);p.setColor(Color.WHITE);c.drawOval(-15,-10,-2,4,p);c.drawOval(3,-10,16,4,p);p.setColor(0xFF24313E);c.drawCircle(-9,-3,4,p);c.drawCircle(9,-3,4,p);p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(4);p.setColor(0xFF741725);c.drawArc(-13,2,13,21,12,145,false,p);p.setStyle(Paint.Style.FILL);p.setColor(0xFFFFB6B6);c.drawCircle(-6,10,3,p);c.restore();}
-    private void drawShot(Canvas c,Shot q){p.setColor(0xFFFF7043);p.setShadowLayer(12,0,0,0xAAFF7043);c.drawCircle(q.x,q.y,q.r,p);p.clearShadowLayer();}
-    private void drawBoss(Canvas c){p.setShadowLayer(24,0,12,0xAA000000);p.setColor(0xFF4E5660);c.drawRoundRect(bossX-76,bossY-76,bossX+76,bossY+76,14,14,p);p.clearShadowLayer();p.setColor(0xFFE73D45);c.drawCircle(bossX-25,bossY-12,16,p);c.drawCircle(bossX+25,bossY-12,16,p);p.setColor(Color.WHITE);c.drawCircle(bossX-25,bossY-12,7,p);c.drawCircle(bossX+25,bossY-12,7,p);p.setColor(0xFF2A2026);c.drawRoundRect(bossX-45,bossY+18,bossX+45,bossY+42,10,10,p);p.setColor(0xFFFFF2DA);for(int i=0;i<7;i++)c.drawRect(bossX-35+i*11,bossY+21,bossX-29+i*11,bossY+39,p);p.setColor(0xFF20252C);c.drawRect(bossX-82,bossY-104,bossX+82,bossY-92,p);p.setColor(0xFF62E37E);c.drawRect(bossX-79,bossY-101,bossX-79+158*(bossHp/bossMaxHp),bossY-95,p);}
-    private void drawGoal(Canvas c){p.setColor(0xFF5C4932);c.drawRect(worldW-110,555,worldW-104,650,p);p.setColor(0xFFFF5E62);Path z=new Path();z.moveTo(worldW-104,560);z.lineTo(worldW-44,577);z.lineTo(worldW-104,594);z.close();c.drawPath(z,p);}
-    private void drawParticle(Canvas c,Particle q){p.setAlpha((int)(255*Math.max(0,q.life/q.max)));p.setColor(q.color);c.drawCircle(q.x,q.y,q.size,p);p.setAlpha(255);}
+    public void resumeGame() {
+        lifecyclePaused = false;
+        lastNs = System.nanoTime();
+        invalidate();
+    }
 
-    private void hud(Canvas c,int w,int h){p.setColor(0xAA17324A);c.drawRoundRect(18,16,315,70,20,20,p);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(20);c.drawText(endlessMode?"ENDLESS  "+endlessScore:"LEVEL  "+level+"   ★ "+levelGems,34,50,p);p.setTypeface(Typeface.DEFAULT);p.setTextSize(15);c.drawText(formatTime(elapsed),230,50,p);button(c,w-68,44,64,54,"Ⅱ",0x663A5877);}
-    private void controls(Canvas c,int w,int h){float cy=h-78;float bw=Math.max(112,w*.16f),bh=86;button(c,bw*.55f,cy,bw,bh,"‹",0x66324D63);button(c,bw*1.55f,cy,bw,bh,"›",0x66324D63);float jw=Math.max(128,w*.19f);button(c,w-jw*.58f,cy,jw,bh,"↑",0x667DFFB2);}
-    private void menu(Canvas c,int w,int h){p.setShader(new LinearGradient(0,0,w,h,0xFF5BC6FF,0xFFB7F28B,Shader.TileMode.CLAMP));c.drawRect(0,0,w,h,p);p.setShader(null);p.setColor(0xFFFFE67A);c.drawCircle(w-110,92,44,p);drawLogo(c,w/2f,h*.29f,84);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setColor(Color.WHITE);p.setTextSize(48);c.drawText("BALL",w/2f,h*.49f,p);p.setColor(0xFFBFEFFF);p.setTextSize(40);c.drawText("PLATFORMER",w/2f,h*.56f,p);button(c,w/2f,h*.66f,290,72,"PLAY",0xCC2E8DB8);button(c,w/2f,h*.75f,290,66,"LEVEL SELECT",0x88455B67);button(c,w/2f,h*.83f,290,66,"ENDLESS MODE",0x88455B67);button(c,w*.85f,h*.75f,80,62,"⚙",0x88455B67);p.setTypeface(Typeface.DEFAULT);p.setTextSize(13);p.setColor(0xDDFFFFFF);c.drawText("32 levels • bosses • stars • checkpoints • endless",w/2f,h-20,p);p.setTextAlign(Paint.Align.LEFT);}
-    private void drawLogo(Canvas c,float xx,float yy,float rr){p.setShader(new RadialGradient(xx-18,yy-22,rr,new int[]{Color.WHITE,0xFFFFB8BD,0xFFD63B45,0xFF7A1822},new float[]{0,.12f,.63f,1},Shader.TileMode.CLAMP));c.drawCircle(xx,yy,rr,p);p.setShader(null);p.setColor(Color.WHITE);c.drawOval(xx-42,yy-28,xx-18,yy-2,p);c.drawOval(xx+10,yy-28,xx+34,yy-2,p);p.setColor(0xFF27313C);c.drawCircle(xx-30,yy-13,6,p);c.drawCircle(xx+22,yy-13,6,p);}
-    private void select(Canvas c,int w,int h){p.setColor(0xFF0C2A33);c.drawRect(0,0,w,h,p);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(34);c.drawText("SELECT LEVEL",28,52,p);p.setTypeface(Typeface.DEFAULT);p.setTextSize(15);p.setColor(0xCCFFFFFF);c.drawText("Unlocked "+unlocked+" / "+LEVELS,30,78,p);float gx=w/8.5f;for(int i=1;i<=LEVELS;i++){int rr=(i-1)/8,cc=(i-1)%8;float px=54+cc*gx,py=124+rr*70;boolean open=i<=unlocked;p.setColor(open?0xFF2E7181:0xFF33404A);c.drawRoundRect(px-40,py-25,px+40,py+25,14,14,p);p.setTextAlign(Paint.Align.CENTER);p.setColor(open?0xFFFFD43B:0xFF77818A);p.setTextSize(21);c.drawText(String.valueOf(i),px,py+7,p);}p.setTextAlign(Paint.Align.LEFT);button(c,w-76,h-48,126,64,"BACK",0x663A5877);}
-    private void pause(Canvas c,int w,int h){overlay(c);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(42);p.setColor(Color.WHITE);c.drawText("PAUSED",w/2f,h*.27f,p);button(c,w/2f,h*.50f,240,64,"RESUME",0xCC2E8DB8);button(c,w/2f,h*.63f,240,62,"RESTART",0x663A5877);button(c,w/2f,h*.76f,240,62,"LEVEL SELECT",0x663A5877);p.setTextAlign(Paint.Align.LEFT);}
-    private void win(Canvas c,int w,int h){overlay(c);p.setTextAlign(Paint.Align.CENTER);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(40);p.setColor(0xFFFFD43B);c.drawText(endlessMode?"ENDLESS RUN":(level==LEVELS?"WORLD COMPLETE!":"LEVEL COMPLETE!"),w/2f,h*.26f,p);p.setTypeface(Typeface.DEFAULT);p.setColor(Color.WHITE);p.setTextSize(20);if(endlessMode)c.drawText("Best  "+bestEndless+"   Score  "+endlessScore,w/2f,h*.39f,p);else{c.drawText("Time  "+formatTime(elapsed),w/2f,h*.37f,p);c.drawText("Stars  "+starsText(),w/2f,h*.44f,p);}button(c,w/2f,h*.60f,270,66,endlessMode?"RUN AGAIN":(level<LEVELS?"NEXT LEVEL":"PLAY AGAIN"),0xCC2E8DB8);button(c,w/2f,h*.74f,270,62,"LEVEL SELECT",0x663A5877);p.setTextAlign(Paint.Align.LEFT);}
-    private void settings(Canvas c,int w,int h){p.setColor(0xFF0C2A33);c.drawRect(0,0,w,h,p);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextSize(38);c.drawText("SETTINGS",30,60,p);p.setTypeface(Typeface.DEFAULT);p.setTextSize(20);c.drawText("Sound",38,140,p);button(c,230,130,170,58,muted?"OFF":"ON",muted?0x663A5877:0xCC2E8DB8);c.drawText("Ball skin",38,220,p);button(c,230,210,170,58,skin==0?"RED":skin==1?"PINK":"GREEN",0x663A5877);c.drawText("Lifetime stars: "+totalGems,38,295,p);c.drawText("Best endless: "+bestEndless,38,330,p);button(c,230,420,230,62,"BACK",0x663A5877);}
-    private String starsText(){int st=1;if(deaths<=3)st++;if(levelGems>=3)st++;StringBuilder b=new StringBuilder();for(int i=0;i<3;i++)b.append(i<st?'★':'☆');return b.toString();}
-    private void overlay(Canvas c){p.setColor(0xAA050B13);c.drawRect(0,0,getWidth(),getHeight(),p);}
-    private void button(Canvas c,float cx,float cy,float w,float h,String t,int col){p.setColor(col);c.drawRoundRect(cx-w/2,cy-h/2,cx+w/2,cy+h/2,20,20,p);s.setColor(0x88FFFFFF);s.setStrokeWidth(2);c.drawRoundRect(cx-w/2,cy-h/2,cx+w/2,cy+h/2,20,20,s);p.setColor(Color.WHITE);p.setTypeface(Typeface.DEFAULT_BOLD);p.setTextAlign(Paint.Align.CENTER);p.setTextSize(Math.min(31,h*.38f));c.drawText(t,cx,cy+h*.13f,p);p.setTextAlign(Paint.Align.LEFT);}
+    public void pauseForLifecycle() {
+        lifecyclePaused = true;
+        clearPointers();
+    }
 
-    @Override public boolean onTouchEvent(MotionEvent e){int a=e.getActionMasked();int idx=e.getActionIndex();float tx=e.getX(idx),ty=e.getY(idx);if(ui==0&&a==MotionEvent.ACTION_UP){float cx=getWidth()/2f;if(hitRect(tx,ty,cx,getHeight()*.66f,320,82)){startLevel(unlocked);return true;}if(hitRect(tx,ty,cx,getHeight()*.75f,320,78)){ui=1;return true;}if(hitRect(tx,ty,cx,getHeight()*.83f,320,78)){startEndless();return true;}if(hitRect(tx,ty,getWidth()*.85f,getHeight()*.75f,105,78)){ui=5;return true;}return true;}if(ui==1&&a==MotionEvent.ACTION_UP){float gx=getWidth()/8.5f;for(int i=1;i<=LEVELS;i++){int rr=(i-1)/8,cc=(i-1)%8;float px=54+cc*gx,py=124+rr*70;if(i<=unlocked&&hitRect(tx,ty,px,py,98,64)){startLevel(i);return true;}}if(hitRect(tx,ty,getWidth()-76,getHeight()-48,145,76)){ui=0;return true;}return true;}if(ui==5&&a==MotionEvent.ACTION_UP){if(hitRect(tx,ty,230,130,200,72)){muted=!muted;save();return true;}if(hitRect(tx,ty,230,210,200,72)){skin=(skin+1)%3;save();return true;}if(hitRect(tx,ty,230,420,260,76)){ui=0;return true;}return true;}if(ui==3&&a==MotionEvent.ACTION_UP){if(hitRect(tx,ty,getWidth()/2f,getHeight()*.50f,260,78)){ui=2;Audio.music(endlessMode?0:level,muted);return true;}if(hitRect(tx,ty,getWidth()/2f,getHeight()*.63f,260,76)){if(endlessMode)startEndless();else startLevel(level);return true;}if(hitRect(tx,ty,getWidth()/2f,getHeight()*.76f,260,76)){ui=1;Audio.stopAll();return true;}return true;}if(ui==4&&a==MotionEvent.ACTION_UP){if(hitRect(tx,ty,getWidth()/2f,getHeight()*.60f,290,82)){if(endlessMode)startEndless();else startLevel(level<LEVELS?level+1:1);return true;}if(hitRect(tx,ty,getWidth()/2f,getHeight()*.74f,290,78)){ui=1;return true;}return true;}if(ui==2){if(a==MotionEvent.ACTION_UP&&ty<100&&tx>getWidth()-145){ui=3;Audio.stopAll();return true;}handleGameplayTouch(e);return true;}return true;}
+    @Override
+    protected void onDraw(Canvas canvas) {
+        long now = System.nanoTime();
+        float dt = Math.min(0.033f, Math.max(0f, (now - lastNs) / 1_000_000_000f));
+        lastNs = now;
+        if (!lifecyclePaused && ui == 2) update(dt);
+        render(canvas);
+        postInvalidateOnAnimation();
+    }
 
-    private void handleGameplayTouch(MotionEvent e){int a=e.getActionMasked(),idx=e.getActionIndex(),id=e.getPointerId(idx);float tx=e.getX(idx),ty=e.getY(idx);boolean down=a==MotionEvent.ACTION_DOWN||a==MotionEvent.ACTION_POINTER_DOWN;boolean up=a==MotionEvent.ACTION_UP||a==MotionEvent.ACTION_POINTER_UP||a==MotionEvent.ACTION_CANCEL;float h=getHeight(),w=getWidth();if(down){if(inLeft(tx,ty,w,h)){leftId=id;return;}if(inRight(tx,ty,w,h)){rightId=id;return;}if(inJump(tx,ty,w,h)){jumpId=id;jumpPressed=true;return;}}if(up){if(id==leftId)leftId=-1;if(id==rightId)rightId=-1;if(id==jumpId){jumpId=-1;return;}}}
-    private boolean inLeft(float x,float y,float w,float h){return y>h-155&&x<w*.24f;}
-    private boolean inRight(float x,float y,float w,float h){return y>h-155&&x>=w*.24f&&x<w*.48f;}
-    private boolean inJump(float x,float y,float w,float h){return y>h-170&&x>w*.73f;}
-    private void clearPointers(){leftId=rightId=jumpId=-1;}
-    private boolean hitRect(float x,float y,float cx,float cy,float w,float h){return Math.abs(x-cx)<=w/2&&Math.abs(y-cy)<=h/2;}
-    private static boolean circleRect(float cx,float cy,float r,RectF q){float nx=clamp(cx,q.left,q.right),ny=clamp(cy,q.top,q.bottom),dx=cx-nx,dy=cy-ny;return dx*dx+dy*dy<=r*r;}
-    private static boolean hit(float ax,float ay,float ar,float bx,float by,float br){float dx=ax-bx,dy=ay-by,rr=ar+br;return dx*dx+dy*dy<=rr*rr;}
-    private static float clamp(float v,float a,float b){return Math.max(a,Math.min(b,v));}
-    private static int clampi(int v,int a,int b){return Math.max(a,Math.min(b,v));}
-    private static String formatTime(long ms){return String.format(Locale.US,"%02d:%02d",(ms/1000)/60,(ms/1000)%60);}
-    private void burst(float px,float py,int n,int color){for(int i=0;i<n;i++){double a=rng.nextDouble()*Math.PI*2;float sp=50+rng.nextFloat()*300;particles.add(new Particle(px,py,(float)Math.cos(a)*sp,(float)Math.sin(a)*sp-50,2+rng.nextFloat()*5,color,.35f+rng.nextFloat()*.55f));}}
-    private void save(){prefs.edit().putInt("unlocked",unlocked).putInt("gems",totalGems).putInt("best_endless",bestEndless).putInt("skin",skin).putBoolean("muted",muted).apply();}
+    private void update(float dt) {
+        elapsedMs += (long) (dt * 1000f);
+        updatePlatforms(dt);
+        if (endlessMode) ensureEndlessWorld();
+        updatePlayer(dt);
+        updateEnemies(dt);
+        updateProjectiles(dt);
+        collectGems();
+        checkHazards();
+        checkCheckpoints();
+        updateBoss(dt);
+        updateParticles(dt);
 
-    private static final class Gem{final float x,y,r=17;final int phase;boolean got;Gem(float x,float y,int phase){this.x=x;this.y=y;this.phase=phase;}}
-    private static final class Checkpoint{final float x,y;boolean active;Checkpoint(float x,float y){this.x=x;this.y=y;}}
-    private static final class Particle{float x,y,vx,vy,size,life,max;final int color;Particle(float x,float y,float vx,float vy,float size,int color,float life){this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.size=size;this.color=color;this.life=life;this.max=life;}}
-    private static final class Shot{float x,y,vx,vy,r,life=5;Shot(float x,float y,float vx,float vy,float r){this.x=x;this.y=y;this.vx=vx;this.vy=vy;this.r=r;}}
-    private static final class Platform{final float bx,by,w,h,range,speed;float x,y,t,dx,dy;final int axis;Platform(float x,float y,float w,float h,float range,float speed,int axis){bx=this.x=x;by=this.y=y;this.w=w;this.h=h;this.range=range;this.speed=speed;this.axis=axis;}RectF rect(){return new RectF(x,y,x+w,y+h);}}
-    private static final class Enemy{float x,y,baseY,speed,t,hitAt;final float min,max,size=42;final int type;int dir=1;boolean alive=true;Enemy(float x,float y,int type,float speed){this.x=x;this.y=y;this.baseY=y;this.type=type;this.speed=speed;min=x-125;max=x+125;}void update(float dt){t+=dt;if(type==0){x+=dir*speed*dt;}else if(type==1){x+=(float)Math.sin(t*2.2)*speed*.55f*dt;y=baseY+(float)Math.sin(t*3.2)*42;}else{x+=dir*speed*dt;y=baseY-(float)Math.abs(Math.sin(t*2.8))*40;}if(x<min||x>max)dir*=-1;}void draw(Canvas c){float z=size/2;p.setShadowLayer(10,0,7,0x66000000);p.setColor(0xFF414A53);c.drawRoundRect(x-z,y-z,x+z,y+z,7,7,p);p.clearShadowLayer();p.setColor(0xFF273038);c.drawRect(x-z+5,y+z-10,x+z-5,y+z-5,p);p.setColor(0xFFFFC857);c.drawCircle(x-10,y-7,8,p);c.drawCircle(x+10,y-7,8,p);p.setColor(Color.BLACK);c.drawCircle(x-10+dir*2,y-7,3,p);c.drawCircle(x+10+dir*2,y-7,3,p);p.setColor(0xFF2A1A1E);c.drawRoundRect(x-17,y+5,x+17,y+18,5,5,p);p.setColor(0xFFFFFFFF);for(int i=0;i<5;i++)c.drawRect(x-13+i*6,y+7,x-10+i*6,y+13,p);}}
-    private static final class Audio{static final int JUMP=1,COIN=2,HURT=3,WIN=4,SPRING=5,CHECK=6,BOSS=7;static final int RATE=22050;static volatile boolean musicRun;static Thread musicThread;static void play(int t,boolean mute){if(mute)return;float f=t==JUMP?700:t==COIN?980:t==HURT?180:t==WIN?760:t==SPRING?520:t==CHECK?880:240;float d=t==WIN?.4f:.11f;new Thread(()->tone(f,d,t==HURT?.22f:.15f)).start();}static void tone(float f,float d,float vol){int n=(int)(RATE*d);short[] a=new short[n];for(int i=0;i<n;i++){float z=i/(float)RATE,e=Math.min(1,z*30)*Math.min(1,(d-z)*15);a[i]=(short)(Math.sin(6.28318*f*z)*32767*vol*e);}AudioTrack q=new AudioTrack(AudioManager.STREAM_MUSIC,RATE,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT,n*2,AudioTrack.MODE_STATIC);q.write(a,0,a.length);q.play();try{Thread.sleep((long)(d*1000)+20);}catch(Exception ignored){}q.release();}static void music(int lv,boolean mute){stopAll();if(mute)return;musicRun=true;musicThread=new Thread(()->{float[] ns={261.6f,329.6f,392f,523.3f,392f,329.6f,293.7f,349.2f};while(musicRun)for(float f:ns){if(!musicRun)break;tone(f,.12f,.032f);}});musicThread.start();}static void stopAll(){musicRun=false;if(musicThread!=null)musicThread.interrupt();musicThread=null;}}
+        if (!endlessMode && !bossAlive && x >= worldW - 180f) finishLevel();
+        if (endlessMode) {
+            endlessScore = Math.max(endlessScore, (int) ((x - 260f) / 7f) + levelGems * 100);
+            if (endlessScore > bestEndless) {
+                bestEndless = endlessScore;
+                save();
+            }
+        }
+        followCamera(dt);
+    }
+
+    private void updatePlayer(float dt) {
+        boolean left = leftPointer >= 0;
+        boolean right = rightPointer >= 0;
+        boolean jumpHeld = jumpPointer >= 0;
+
+        if (left) vx -= 1800f * dt;
+        if (right) vx += 1800f * dt;
+        if (!left && !right) vx *= (float) Math.pow(0.0009, dt);
+        vx = clamp(vx, -700f, 700f);
+
+        long now = android.os.SystemClock.uptimeMillis();
+        if (jumpQueued) {
+            jumpQueueUntil = now + 150L;
+            jumpQueued = false;
+        }
+        if (now <= jumpQueueUntil && (grounded || now - groundedAt <= 130L)) {
+            vy = -1030f;
+            grounded = false;
+            jumpQueueUntil = 0L;
+            burst(x, y + BALL_R, 10, 0xFFBDEBFF);
+        }
+
+        if (!jumpHeld && vy < -420f) vy += 1800f * dt;
+        vy += 2450f * dt;
+        vy = clamp(vy, -1200f, 1500f);
+
+        float oldX = x;
+        float oldY = y;
+        x += vx * dt;
+        y += vy * dt;
+        grounded = false;
+
+        for (RectF solid : solids) resolveSolid(solid, oldX, oldY);
+        for (Platform platform : platforms) {
+            RectF r = platform.rect();
+            if (circleRect(x, y, BALL_R, r) && oldY + BALL_R <= r.top + 7f && y + BALL_R >= r.top) {
+                y = r.top - BALL_R;
+                vy = 0f;
+                grounded = true;
+                groundedAt = now;
+                x += platform.dx;
+                y += platform.dy;
+            }
+        }
+        if (y > 1450f) respawn();
+    }
+
+    private void resolveSolid(RectF solid, float oldX, float oldY) {
+        if (!circleRect(x, y, BALL_R, solid)) return;
+        if (oldX + BALL_R <= solid.left && x + BALL_R > solid.left) {
+            x = solid.left - BALL_R;
+            vx = -Math.abs(vx) * 0.12f;
+        } else if (oldX - BALL_R >= solid.right && x - BALL_R < solid.right) {
+            x = solid.right + BALL_R;
+            vx = Math.abs(vx) * 0.12f;
+        } else if (oldY + BALL_R <= solid.top && y + BALL_R > solid.top) {
+            y = solid.top - BALL_R;
+            vy = 0f;
+            grounded = true;
+            groundedAt = android.os.SystemClock.uptimeMillis();
+        } else if (oldY - BALL_R >= solid.bottom && y - BALL_R < solid.bottom) {
+            y = solid.bottom + BALL_R;
+            vy = Math.max(0f, vy);
+        }
+    }
+
+    private void updatePlatforms(float dt) {
+        for (Platform platform : platforms) {
+            float oldX = platform.x;
+            float oldY = platform.y;
+            platform.t += dt * platform.speed;
+            float wave = (float) Math.sin(platform.t) * platform.range;
+            if (platform.axis == 0) platform.x = platform.baseX + wave;
+            else platform.y = platform.baseY + wave;
+            platform.dx = platform.x - oldX;
+            platform.dy = platform.y - oldY;
+        }
+    }
+
+    private void updateEnemies(float dt) {
+        for (Enemy enemy : enemies) if (enemy.alive) enemy.update(dt);
+    }
+
+    private void updateProjectiles(float dt) {
+        Iterator<Projectile> iterator = projectiles.iterator();
+        while (iterator.hasNext()) {
+            Projectile q = iterator.next();
+            q.x += q.vx * dt;
+            q.y += q.vy * dt;
+            q.vy += 520f * dt;
+            q.life -= dt;
+            if (q.life <= 0f || q.x < cameraX - 800f || q.x > cameraX + getWidth() + 1000f) iterator.remove();
+        }
+    }
+
+    private void collectGems() {
+        for (Gem gem : gems) {
+            if (!gem.collected && hit(x, y, BALL_R, gem.x, gem.y, gem.r)) {
+                gem.collected = true;
+                levelGems++;
+                totalGems++;
+                save();
+                burst(gem.x, gem.y, 12, 0xFFFFD54A);
+            }
+        }
+    }
+
+    private void checkHazards() {
+        for (RectF spike : spikes) if (circleRect(x, y, BALL_R, spike)) {
+            respawn();
+            return;
+        }
+        for (RectF spring : springs) if (circleRect(x, y, BALL_R, spring) && vy >= 0f) {
+            y = spring.top - BALL_R;
+            vy = -1340f;
+            grounded = false;
+            burst(x, y + BALL_R, 14, 0xFF74E7FF);
+        }
+        for (Projectile projectile : projectiles) if (hit(x, y, BALL_R, projectile.x, projectile.y, projectile.r)) {
+            respawn();
+            return;
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        for (Enemy enemy : enemies) if (enemy.alive && hit(x, y, BALL_R, enemy.x, enemy.y, enemy.size * 0.72f)) {
+            boolean stomp = vy > 0f && y + BALL_R < enemy.y + enemy.size * 0.32f && Math.abs(x - enemy.x) < enemy.size * 0.95f;
+            if (stomp && now - enemy.lastHit > 220L) {
+                enemy.alive = false;
+                vy = -900f;
+                burst(enemy.x, enemy.y, 20, 0xFFFFC04A);
+            } else if (now - enemy.lastHit > 500L) {
+                enemy.lastHit = now;
+                respawn();
+                return;
+            }
+        }
+    }
+
+    private void checkCheckpoints() {
+        for (Checkpoint checkpoint : checkpoints) {
+            if (!checkpoint.active && Math.abs(x - checkpoint.x) < 50f && Math.abs(y - checkpoint.y) < 120f) {
+                checkpoint.active = true;
+                checkpointX = checkpoint.x;
+                checkpointY = checkpoint.y - 60f;
+                burst(checkpoint.x, checkpoint.y - 55f, 16, 0xFF7DFFB2);
+            }
+        }
+    }
+
+    private void updateBoss(float dt) {
+        if (!bossAlive) return;
+        if (bossHp <= 0f) {
+            bossAlive = false;
+            burst(bossX, bossY, 55, 0xFFFFD166);
+            return;
+        }
+        bossTimer += dt;
+        bossX += (x - bossX) * Math.min(1f, dt * 1.15f);
+        bossY = 590f + (float) Math.sin(bossTimer * 2.1f) * 36f;
+        if (bossTimer > 1.15f) {
+            bossTimer = 0f;
+            float dx = x - bossX;
+            float dy = y - bossY;
+            float length = Math.max(1f, (float) Math.hypot(dx, dy));
+            projectiles.add(new Projectile(bossX, bossY, dx / length * 430f, dy / length * 430f, 16f));
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        if (hit(x, y, BALL_R, bossX, bossY, 72f) && now - bossHitAt > 700L) respawn();
+        if (vy > 0f && y + BALL_R < bossY + 22f && y + BALL_R > bossY - 50f && Math.abs(x - bossX) < 84f && now - bossHitAt > 450L) {
+            bossHp -= 25f;
+            bossHitAt = now;
+            vy = -850f;
+            burst(bossX, bossY, 22, 0xFFFFA95A);
+        }
+    }
+
+    private void updateParticles(float dt) {
+        Iterator<Particle> iterator = particles.iterator();
+        while (iterator.hasNext()) {
+            Particle particle = iterator.next();
+            particle.life -= dt;
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.vy += 520f * dt;
+            particle.vx *= 0.985f;
+            if (particle.life <= 0f) iterator.remove();
+        }
+    }
+
+    private void followCamera(float dt) {
+        float targetX = x - getWidth() * 0.34f;
+        float targetY = y - getHeight() * 0.55f;
+        cameraX += (targetX - cameraX) * Math.min(1f, dt * 5f);
+        cameraY += (targetY - cameraY) * Math.min(1f, dt * 5f);
+        float maxX = endlessMode ? Math.max(0f, segmentCursor - getWidth() * 0.75f) : Math.max(0f, worldW - getWidth());
+        cameraX = clamp(cameraX, 0f, maxX);
+        cameraY = clamp(cameraY, -80f, 430f);
+        cameraShake *= 0.87f;
+    }
+
+    private void respawn() {
+        deaths++;
+        x = checkpointX;
+        y = checkpointY;
+        vx = 0f;
+        vy = 0f;
+        cameraShake = 0.55f;
+        projectiles.clear();
+        burst(x, y, 18, 0xFFFF6B6B);
+    }
+
+    private void finishLevel() {
+        ui = 4;
+        if (level < LEVELS) unlocked = Math.max(unlocked, level + 1);
+        save();
+        burst(x, y, 42, 0xFFFFD54A);
+    }
+
+    private void startLevel(int id) {
+        level = clampInt(id, 1, LEVELS);
+        endlessMode = false;
+        elapsedMs = 0L;
+        deaths = 0;
+        levelGems = 0;
+        endlessScore = 0;
+        bossAlive = false;
+        cameraX = 0f;
+        cameraY = 0f;
+        checkpointX = 260f;
+        checkpointY = 650f;
+        x = checkpointX;
+        y = checkpointY;
+        vx = 0f;
+        vy = 0f;
+        clearWorld();
+        buildLevel(level);
+        ui = 2;
+    }
+
+    private void startEndless() {
+        level = ENDLESS;
+        endlessMode = true;
+        elapsedMs = 0L;
+        deaths = 0;
+        levelGems = 0;
+        endlessScore = 0;
+        bossAlive = false;
+        cameraX = 0f;
+        cameraY = 0f;
+        checkpointX = 260f;
+        checkpointY = 650f;
+        x = checkpointX;
+        y = checkpointY;
+        vx = 0f;
+        vy = 0f;
+        endlessSeed = (int) (System.currentTimeMillis() & 0x7FFFFFFF);
+        segmentCursor = 820f;
+        clearWorld();
+        solids.add(new RectF(0f, 805f, 820f, 950f));
+        generateEndlessSegment();
+        ui = 2;
+    }
+
+    private void buildLevel(int id) {
+        int world = (id - 1) / 8;
+        int variant = (id - 1) % 8;
+        theme = world;
+        worldW = 6000f + world * 520f + variant * 180f;
+        Random r = new Random(id * 9973L);
+        solids.add(new RectF(0f, 805f, 820f, 950f));
+        float cursor = 735f;
+        for (int i = 0; i < 18 + world; i++) {
+            cursor += 55f + r.nextInt(95);
+            float width = 360f + r.nextInt(290);
+            float top = 775f - (i % 3) * 55f - (variant % 2) * 12f;
+            solids.add(new RectF(cursor, top, cursor + width, top + 145f));
+            if (i % 2 == 0) gems.add(new Gem(cursor + width * 0.46f, top - 72f, i * 41));
+            if ((i + variant) % 3 == 1) spikes.add(new RectF(cursor + width * 0.66f, top - 24f, cursor + width * 0.66f + 50f, top + 18f));
+            if ((i + world) % 5 == 2) springs.add(new RectF(cursor + width * 0.20f, top - 28f, cursor + width * 0.20f + 74f, top + 4f));
+            if ((i + id) % 3 != 0) enemies.add(new Enemy(cursor + width * 0.76f, top - 33f, (i + id) % 3, 90f + (id % 5) * 14f));
+            if (i % 4 == 2) platforms.add(new Platform(cursor + width * 0.33f, top - 150f, 160f, 25f, 50f + (i % 2) * 25f, 0.8f + (i % 3) * 0.2f, i % 2));
+            if (i == 5 || i == 11) checkpoints.add(new Checkpoint(cursor + width * 0.18f, top));
+            cursor += width;
+        }
+        while (cursor < worldW - 520f) {
+            cursor += 85f;
+            solids.add(new RectF(cursor, 820f, cursor + 480f, 960f));
+            if (((int) cursor / 100) % 2 == 0) gems.add(new Gem(cursor + 215f, 742f, (int) cursor));
+            cursor += 480f;
+        }
+        solids.add(new RectF(worldW - 600f, 560f, worldW - 270f, 620f));
+        solids.add(new RectF(worldW - 270f, 690f, worldW + 30f, 950f));
+        if (id % 8 == 0) {
+            bossAlive = true;
+            bossX = worldW - 650f;
+            bossY = 600f;
+            bossMaxHp = 125f + world * 40f;
+            bossHp = bossMaxHp;
+        }
+    }
+
+    private void generateEndlessSegment() {
+        Random r = new Random(endlessSeed + (long) (segmentCursor * 31f));
+        float gap = 65f + r.nextInt(95);
+        float width = 390f + r.nextInt(330);
+        float top = 720f - r.nextInt(180);
+        float start = segmentCursor + gap;
+        solids.add(new RectF(start, top, start + width, top + 145f));
+        if (r.nextFloat() < 0.70f) gems.add(new Gem(start + width * 0.46f, top - 72f, r.nextInt()));
+        if (r.nextFloat() < 0.45f) spikes.add(new RectF(start + width * 0.64f, top - 24f, start + width * 0.64f + 48f, top + 18f));
+        if (r.nextFloat() < 0.22f) springs.add(new RectF(start + width * 0.20f, top - 28f, start + width * 0.20f + 72f, top + 4f));
+        if (r.nextFloat() < 0.48f) enemies.add(new Enemy(start + width * 0.76f, top - 33f, r.nextInt(3), 95f + r.nextInt(70)));
+        if (r.nextFloat() < 0.30f) platforms.add(new Platform(start + width * 0.34f, top - 155f, 160f, 25f, 45f + r.nextInt(45), 0.8f + r.nextFloat() * 0.8f, r.nextBoolean() ? 0 : 1));
+        segmentCursor = start + width;
+    }
+
+    private void ensureEndlessWorld() {
+        while (segmentCursor < x + getWidth() * 3f) generateEndlessSegment();
+        float cut = cameraX - 1000f;
+        trimSolids(cut);
+        trimSpikes(cut);
+        trimSprings(cut);
+        trimPlatforms(cut);
+        trimGems(cut);
+        trimEnemies(cut);
+    }
+
+    private void trimSolids(float cut) { Iterator<RectF> it = solids.iterator(); while (it.hasNext()) if (it.next().right < cut) it.remove(); }
+    private void trimSpikes(float cut) { Iterator<RectF> it = spikes.iterator(); while (it.hasNext()) if (it.next().right < cut) it.remove(); }
+    private void trimSprings(float cut) { Iterator<RectF> it = springs.iterator(); while (it.hasNext()) if (it.next().right < cut) it.remove(); }
+    private void trimPlatforms(float cut) { Iterator<Platform> it = platforms.iterator(); while (it.hasNext()) if (it.next().x < cut) it.remove(); }
+    private void trimGems(float cut) { Iterator<Gem> it = gems.iterator(); while (it.hasNext()) { Gem g = it.next(); if (g.x < cut || g.collected) it.remove(); } }
+    private void trimEnemies(float cut) { Iterator<Enemy> it = enemies.iterator(); while (it.hasNext()) if (it.next().x < cut) it.remove(); }
+
+    private void clearWorld() {
+        solids.clear();
+        spikes.clear();
+        springs.clear();
+        checkpoints.clear();
+        gems.clear();
+        particles.clear();
+        projectiles.clear();
+        platforms.clear();
+        enemies.clear();
+    }
+
+    private void render(Canvas canvas) {
+        int w = getWidth();
+        int h = getHeight();
+        if (ui == 0) menu(canvas, w, h);
+        else if (ui == 1) levelSelect(canvas, w, h);
+        else if (ui == 5) settings(canvas, w, h);
+        else {
+            world(canvas, w, h);
+            if (ui == 3) pause(canvas, w, h);
+            if (ui == 4) win(canvas, w, h);
+        }
+    }
+
+    private void world(Canvas canvas, int w, int h) {
+        int skyTop = theme == 0 ? 0xFF56CFFF : theme == 1 ? 0xFF4B78A1 : theme == 2 ? 0xFF33274E : 0xFF33454E;
+        int skyBottom = theme == 0 ? 0xFFB8F18D : theme == 1 ? 0xFFD09A62 : theme == 2 ? 0xFF111A31 : 0xFF7A8178;
+        p.setShader(new LinearGradient(0, 0, 0, h, skyTop, skyBottom, Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, w, h, p);
+        p.setShader(null);
+
+        drawBackground(canvas, w, h);
+        canvas.save();
+        canvas.translate(-cameraX, -cameraY);
+        if (cameraShake > 0.01f) canvas.translate((float) Math.sin(elapsedMs * 0.03) * cameraShake * 10f, (float) Math.cos(elapsedMs * 0.02) * cameraShake * 10f);
+
+        for (RectF q : solids) drawGround(canvas, q);
+        for (Platform platform : platforms) drawPlatform(canvas, platform);
+        for (RectF q : springs) drawSpring(canvas, q);
+        for (RectF q : spikes) drawSpike(canvas, q);
+        for (Checkpoint checkpoint : checkpoints) drawCheckpoint(canvas, checkpoint);
+        for (Gem gem : gems) if (!gem.collected) drawStar(canvas, gem);
+        for (Enemy enemy : enemies) if (enemy.alive) enemy.draw(canvas);
+        for (Projectile projectile : projectiles) drawProjectile(canvas, projectile);
+        if (bossAlive) drawBoss(canvas);
+        if (!endlessMode) drawGoal(canvas);
+        for (Particle particle : particles) drawParticle(canvas, particle);
+        drawBall(canvas);
+        canvas.restore();
+
+        drawHud(canvas, w, h);
+        drawControls(canvas, w, h);
+    }
+
+    private void drawBackground(Canvas canvas, int w, int h) {
+        if (theme == 0) {
+            p.setColor(0x88FFFFFF);
+            for (int i = 0; i < 5; i++) {
+                float cx = (i * 270f + 40f) - (cameraX * 0.08f % 1350f);
+                float cy = 90f + (i % 2) * 55f;
+                canvas.drawOval(cx, cy, cx + 130f, cy + 38f, p);
+                canvas.drawOval(cx + 45f, cy - 17f, cx + 175f, cy + 38f, p);
+            }
+            p.setColor(0xFFFFE17D);
+            canvas.drawCircle(w - 90f, 88f, 40f, p);
+        }
+        drawHillLayer(canvas, w, h, 0.12f, theme == 2 ? 0xFF3B3151 : 0xFF82C96A, 125f);
+        drawHillLayer(canvas, w, h, 0.23f, theme == 1 ? 0xFF8F6C4B : 0xFF5CAC50, 92f);
+    }
+
+    private void drawHillLayer(Canvas canvas, int w, int h, float factor, int color, float height) {
+        p.setColor(color);
+        Path path = new Path();
+        float offset = -(cameraX * factor) % 520f;
+        path.moveTo(0, h);
+        for (int i = -520; i < w + 800; i += 170) {
+            float yy = h - height - (float) Math.sin((i + cameraX * factor) * 0.008f) * 28f;
+            path.lineTo(i + offset, yy);
+        }
+        path.lineTo(w, h);
+        path.close();
+        canvas.drawPath(path, p);
+    }
+
+    private void drawGround(Canvas canvas, RectF r) {
+        int dirt = theme == 0 ? 0xFF71451E : theme == 1 ? 0xFF765539 : theme == 2 ? 0xFF353A45 : 0xFF56616A;
+        int grass = theme == 0 ? 0xFF72C83F : theme == 1 ? 0xFF8AA65D : 0xFF64727B;
+        p.setShadowLayer(8f, 0, 5, 0x55000000);
+        p.setColor(dirt);
+        canvas.drawRoundRect(r, 10f, 10f, p);
+        p.clearShadowLayer();
+        p.setColor(grass);
+        canvas.drawRoundRect(r.left, r.top, r.right, Math.min(r.bottom, r.top + 20f), 8f, 8f, p);
+        if (theme == 0) {
+            p.setColor(0xFF4DAF2D);
+            for (int i = (int) r.left; i < r.right; i += 34) {
+                Path blade = new Path();
+                blade.moveTo(i, r.top + 20f);
+                blade.lineTo(i + 7f, r.top + 5f);
+                blade.lineTo(i + 13f, r.top + 20f);
+                blade.close();
+                canvas.drawPath(blade, p);
+            }
+        }
+        p.setColor(0x33502A13);
+        for (int i = (int) r.left + 25; i < r.right; i += 92) canvas.drawOval(i, r.top + 45f, i + 34f, r.top + 63f, p);
+        p.setColor(0x44331E16);
+        for (int i = (int) r.left + 48; i < r.right; i += 145) canvas.drawCircle(i, r.top + 88f, 8f, p);
+    }
+
+    private void drawPlatform(Canvas canvas, Platform platform) {
+        RectF r = platform.rect();
+        p.setShadowLayer(8f, 0, 5, 0x66000000);
+        p.setColor(0xFF8E673D);
+        canvas.drawRoundRect(r, 9f, 9f, p);
+        p.clearShadowLayer();
+        p.setColor(0xFFB9D86A);
+        canvas.drawRoundRect(r.left, r.top, r.right, r.top + 9f, 5f, 5f, p);
+        p.setColor(0xFF5C4029);
+        canvas.drawCircle(r.left + 20, r.centerY(), 4, p);
+        canvas.drawCircle(r.right - 22, r.centerY(), 4, p);
+    }
+
+    private void drawSpring(Canvas canvas, RectF r) {
+        p.setColor(0xFF334052);
+        canvas.drawRoundRect(r, 8f, 8f, p);
+        p.setColor(0xFF79E8FF);
+        canvas.drawRoundRect(r.left + 6f, r.top + 4f, r.right - 6f, r.top + 10f, 4f, 4f, p);
+    }
+
+    private void drawSpike(Canvas canvas, RectF r) {
+        p.setColor(0xFF8C929A);
+        Path shadow = new Path();
+        shadow.moveTo(r.left, r.bottom);
+        shadow.lineTo(r.centerX(), r.top);
+        shadow.lineTo(r.right, r.bottom);
+        shadow.close();
+        canvas.drawPath(shadow, p);
+        p.setColor(0xFFE4E8EC);
+        Path metal = new Path();
+        metal.moveTo(r.left + 4f, r.bottom);
+        metal.lineTo(r.centerX(), r.top + 5f);
+        metal.lineTo(r.right - 4f, r.bottom);
+        metal.close();
+        canvas.drawPath(metal, p);
+    }
+
+    private void drawCheckpoint(Canvas canvas, Checkpoint q) {
+        p.setColor(0xFFE2E7EA);
+        canvas.drawRect(q.x, q.y - 72f, q.x + 5f, q.y, p);
+        p.setColor(q.active ? 0xFF6BEB83 : 0xFFE84F59);
+        Path flag = new Path();
+        flag.moveTo(q.x + 5f, q.y - 70f);
+        flag.lineTo(q.x + 54f, q.y - 54f);
+        flag.lineTo(q.x + 5f, q.y - 38f);
+        flag.close();
+        canvas.drawPath(flag, p);
+    }
+
+    private void drawStar(Canvas canvas, Gem gem) {
+        float pulse = 1f + (float) Math.sin((elapsedMs + gem.phase) * 0.006f) * 0.08f;
+        canvas.save();
+        canvas.translate(gem.x, gem.y);
+        canvas.scale(pulse, pulse);
+        p.setShadowLayer(16f, 0, 0, 0x99FFD34D);
+        p.setColor(0xFFFFD34D);
+        Path star = new Path();
+        for (int i = 0; i < 10; i++) {
+            double a = -Math.PI / 2 + i * Math.PI / 5;
+            float radius = i % 2 == 0 ? 18f : 8f;
+            float sx = (float) Math.cos(a) * radius;
+            float sy = (float) Math.sin(a) * radius;
+            if (i == 0) star.moveTo(sx, sy); else star.lineTo(sx, sy);
+        }
+        star.close();
+        canvas.drawPath(star, p);
+        p.clearShadowLayer();
+        p.setColor(0xFFFFF4B5);
+        canvas.drawCircle(-5f, -7f, 3f, p);
+        canvas.restore();
+    }
+
+    private void drawGoal(Canvas canvas) {
+        float gx = worldW - 110f;
+        float gy = 625f;
+        p.setColor(0xFFE3E7E8);
+        canvas.drawRect(gx, gy - 80f, gx + 5f, gy, p);
+        p.setColor(0xFF63D86F);
+        Path flag = new Path();
+        flag.moveTo(gx + 5f, gy - 78f);
+        flag.lineTo(gx + 55f, gy - 61f);
+        flag.lineTo(gx + 5f, gy - 44f);
+        flag.close();
+        canvas.drawPath(flag, p);
+        p.setColor(0xFF63D86F);
+        p.setStyle(Paint.Style.FILL);
+        canvas.drawCircle(gx - 4f, gy + 2f, 8f, p);
+    }
+
+    private void drawProjectile(Canvas canvas, Projectile q) {
+        p.setShadowLayer(14f, 0, 0, 0xAAFF613F);
+        p.setColor(0xFFFF7043);
+        canvas.drawCircle(q.x, q.y, q.r, p);
+        p.clearShadowLayer();
+    }
+
+    private void drawBoss(Canvas canvas) {
+        float size = 72f;
+        p.setShadowLayer(22f, 0, 8, 0x99000000);
+        p.setColor(0xFF4A4E58);
+        canvas.drawRoundRect(bossX - size, bossY - size, bossX + size, bossY + size, 18f, 18f, p);
+        p.clearShadowLayer();
+        p.setColor(0xFF222630);
+        canvas.drawRoundRect(bossX - 52f, bossY - 42f, bossX + 52f, bossY + 28f, 12f, 12f, p);
+        p.setColor(0xFFFF4E52);
+        canvas.drawCircle(bossX - 25f, bossY - 13f, 10f, p);
+        canvas.drawCircle(bossX + 25f, bossY - 13f, 10f, p);
+        p.setColor(Color.WHITE);
+        canvas.drawCircle(bossX - 21f, bossY - 17f, 4f, p);
+        canvas.drawCircle(bossX + 29f, bossY - 17f, 4f, p);
+        p.setColor(0xFF191C23);
+        canvas.drawRoundRect(bossX - 34f, bossY + 7f, bossX + 34f, bossY + 20f, 6f, 6f, p);
+        p.setColor(0xFF191C23);
+        canvas.drawRoundRect(bossX - 82f, bossY - 95f, bossX + 82f, bossY - 84f, 5f, 5f, p);
+        p.setColor(0xFFFFD35A);
+        float ratio = bossMaxHp <= 0 ? 0 : clamp(bossHp / bossMaxHp, 0f, 1f);
+        canvas.drawRoundRect(bossX - 80f, bossY - 93f, bossX - 80f + 160f * ratio, bossY - 86f, 4f, 4f, p);
+    }
+
+    private void drawParticle(Canvas canvas, Particle particle) {
+        p.setAlpha((int) (255f * clamp(particle.life / particle.maxLife, 0f, 1f)));
+        p.setColor(particle.color);
+        canvas.drawCircle(particle.x, particle.y, particle.size, p);
+        p.setAlpha(255);
+    }
+
+    private void drawBall(Canvas canvas) {
+        int color = skin == 1 ? 0xFFFFB52F : skin == 2 ? 0xFF3BBF7D : 0xFFE9434A;
+        canvas.save();
+        canvas.translate(x, y);
+        p.setShadowLayer(18f, 0, 10f, 0x66000000);
+        p.setShader(new RadialGradient(-10f, -13f, BALL_R + 5f, Color.WHITE, color, Shader.TileMode.CLAMP));
+        canvas.drawCircle(0, 0, BALL_R, p);
+        p.setShader(null);
+        p.clearShadowLayer();
+
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(5f);
+        p.setColor(0x88FFFFFF);
+        float rotation = vx * 10f;
+        canvas.drawArc(-24f, -24f, 24f, 24f, rotation, 135f, false, p);
+        p.setStyle(Paint.Style.FILL);
+
+        p.setColor(Color.WHITE);
+        canvas.drawCircle(-10f, -8f, 7f, p);
+        canvas.drawCircle(10f, -8f, 7f, p);
+        p.setColor(0xFF202532);
+        canvas.drawCircle(-8f, -7f, 3f, p);
+        canvas.drawCircle(12f, -7f, 3f, p);
+        p.setColor(0x88202532);
+        canvas.drawOval(-9f, 6f, 9f, 18f, p);
+        canvas.restore();
+    }
+
+    private void drawHud(Canvas canvas, int w, int h) {
+        p.setColor(0xCC182432);
+        canvas.drawRoundRect(18f, 16f, 340f, 70f, 18f, 18f, p);
+        p.setColor(Color.WHITE);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setTextSize(20f);
+        String title = endlessMode ? "ENDLESS" : "LEVEL " + level;
+        canvas.drawText(title, 36f, 49f, p);
+        p.setTextSize(16f);
+        canvas.drawText("★ " + levelGems, endlessMode ? 175f : 145f, 49f, p);
+        if (endlessMode) {
+            p.setColor(0xFFFFD54A);
+            canvas.drawText("BEST " + bestEndless, 235f, 49f, p);
+        } else {
+            p.setColor(0xFFBDEBFF);
+            canvas.drawText(formatTime(elapsedMs), 235f, 49f, p);
+        }
+        p.setColor(0xAA182432);
+        canvas.drawRoundRect(w - 88f, 16f, w - 18f, 70f, 18f, 18f, p);
+        p.setColor(Color.WHITE);
+        p.setTextSize(25f);
+        p.setTextAlign(Paint.Align.CENTER);
+        canvas.drawText("Ⅱ", w - 53f, 51f, p);
+        p.setTextAlign(Paint.Align.LEFT);
+    }
+
+    private void drawControls(Canvas canvas, int w, int h) {
+        float cy = h - 92f;
+        drawControlCircle(canvas, 84f, cy, 66f, leftPointer >= 0, "‹");
+        drawControlCircle(canvas, 220f, cy, 66f, rightPointer >= 0, "›");
+        drawControlCircle(canvas, w - 92f, cy, 72f, jumpPointer >= 0, "↑");
+    }
+
+    private void drawControlCircle(Canvas canvas, float cx, float cy, float radius, boolean pressed, String text) {
+        p.setColor(pressed ? 0xAAFFF4D1 : 0x553F5567);
+        canvas.drawCircle(cx, cy, radius, p);
+        stroke.setColor(0x99FFFFFF);
+        stroke.setStrokeWidth(3f);
+        canvas.drawCircle(cx, cy, radius, stroke);
+        p.setColor(Color.WHITE);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setTextSize(radius * 0.72f);
+        p.setTextAlign(Paint.Align.CENTER);
+        canvas.drawText(text, cx, cy + radius * 0.25f, p);
+        p.setTextAlign(Paint.Align.LEFT);
+    }
+
+    private void menu(Canvas canvas, int w, int h) {
+        p.setShader(new LinearGradient(0, 0, w, h, 0xFF52C9FF, 0xFF8CDB63, Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, w, h, p);
+        p.setShader(null);
+        drawHillLayer(canvas, w, h, 0.04f, 0x5574B955, 180f);
+        float cx = w * 0.5f;
+        drawLogoBall(canvas, cx, h * 0.24f, 78f);
+        p.setTextAlign(Paint.Align.CENTER);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setColor(Color.WHITE);
+        p.setTextSize(44f);
+        canvas.drawText("BALL", cx, h * 0.46f, p);
+        p.setColor(0xFFFFE36F);
+        p.setTextSize(38f);
+        canvas.drawText("PLATFORMER", cx, h * 0.53f, p);
+        button(canvas, cx, h * 0.66f, 280f, 64f, "PLAY", 0xCCDF3D4C);
+        button(canvas, cx, h * 0.77f, 280f, 58f, "LEVEL SELECT", 0x883D566B);
+        button(canvas, cx, h * 0.87f, 280f, 58f, "ENDLESS MODE", 0x886B7A47);
+        button(canvas, cx + 175f, h * 0.77f, 88f, 58f, "⚙", 0x883D566B);
+        p.setTypeface(Typeface.DEFAULT);
+        p.setTextSize(13f);
+        p.setColor(0xCCFFFFFF);
+        canvas.drawText("32 levels • square minions • bosses • endless", cx, h - 18f, p);
+        p.setTextAlign(Paint.Align.LEFT);
+    }
+
+    private void drawLogoBall(Canvas canvas, float cx, float cy, float radius) {
+        p.setShader(new RadialGradient(cx - 22f, cy - 25f, radius, Color.WHITE, 0xFFD92836, Shader.TileMode.CLAMP));
+        canvas.drawCircle(cx, cy, radius, p);
+        p.setShader(null);
+        p.setColor(Color.WHITE);
+        canvas.drawCircle(cx - 24f, cy - 10f, 12f, p);
+        canvas.drawCircle(cx + 24f, cy - 10f, 12f, p);
+        p.setColor(0xFF202532);
+        canvas.drawCircle(cx - 21f, cy - 9f, 5f, p);
+        canvas.drawCircle(cx + 27f, cy - 9f, 5f, p);
+    }
+
+    private void levelSelect(Canvas canvas, int w, int h) {
+        p.setShader(new LinearGradient(0, 0, 0, h, 0xFF253C59, 0xFF101923, Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, w, h, p);
+        p.setShader(null);
+        p.setColor(Color.WHITE);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setTextSize(34f);
+        canvas.drawText("LEVEL SELECT", 28f, 48f, p);
+        p.setTypeface(Typeface.DEFAULT);
+        p.setTextSize(15f);
+        p.setColor(0xBFFFFFFF);
+        canvas.drawText("Unlocked " + unlocked + " / " + LEVELS, 30f, 74f, p);
+        int columns = 8;
+        float cellW = (w - 70f) / columns;
+        for (int i = 1; i <= LEVELS; i++) {
+            int row = (i - 1) / columns;
+            int col = (i - 1) % columns;
+            float cx = 40f + col * cellW + cellW * 0.5f;
+            float cy = 122f + row * 72f;
+            boolean open = i <= unlocked;
+            p.setColor(open ? 0xFFDF3D4C : 0xFF26323E);
+            canvas.drawRoundRect(cx - 36f, cy - 24f, cx + 36f, cy + 24f, 14f, 14f, p);
+            p.setTextAlign(Paint.Align.CENTER);
+            p.setColor(Color.WHITE);
+            p.setTextSize(19f);
+            canvas.drawText(String.valueOf(i), cx, cy + 7f, p);
+            p.setTextAlign(Paint.Align.LEFT);
+        }
+        button(canvas, w - 74f, h - 42f, 118f, 54f, "BACK", 0x88617484);
+    }
+
+    private void pause(Canvas canvas, int w, int h) {
+        overlay(canvas);
+        p.setTextAlign(Paint.Align.CENTER);
+        p.setColor(Color.WHITE);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setTextSize(44f);
+        canvas.drawText("PAUSED", w * 0.5f, h * 0.27f, p);
+        button(canvas, w * 0.5f, h * 0.48f, 240f, 60f, "RESUME", 0xCCDF3D4C);
+        button(canvas, w * 0.5f, h * 0.61f, 240f, 58f, "RESTART", 0x88617484);
+        button(canvas, w * 0.5f, h * 0.74f, 240f, 58f, "LEVEL SELECT", 0x88617484);
+        p.setTextAlign(Paint.Align.LEFT);
+    }
+
+    private void win(Canvas canvas, int w, int h) {
+        overlay(canvas);
+        p.setTextAlign(Paint.Align.CENTER);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setColor(0xFFFFD54A);
+        p.setTextSize(40f);
+        canvas.drawText(endlessMode ? "ENDLESS RUN" : (level == LEVELS ? "WORLD COMPLETE!" : "LEVEL COMPLETE!"), w * 0.5f, h * 0.25f, p);
+        p.setColor(Color.WHITE);
+        p.setTypeface(Typeface.DEFAULT);
+        p.setTextSize(20f);
+        if (endlessMode) canvas.drawText("Score " + endlessScore + "   Best " + bestEndless, w * 0.5f, h * 0.38f, p);
+        else canvas.drawText("Time " + formatTime(elapsedMs) + "   Gems " + levelGems, w * 0.5f, h * 0.38f, p);
+        button(canvas, w * 0.5f, h * 0.56f, 260f, 60f, endlessMode ? "RUN AGAIN" : (level < LEVELS ? "NEXT LEVEL" : "PLAY AGAIN"), 0xCCDF3D4C);
+        button(canvas, w * 0.5f, h * 0.69f, 260f, 56f, "LEVEL SELECT", 0x88617484);
+        p.setTextAlign(Paint.Align.LEFT);
+    }
+
+    private void settings(Canvas canvas, int w, int h) {
+        p.setColor(0xFF101923);
+        canvas.drawRect(0, 0, w, h, p);
+        p.setColor(Color.WHITE);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setTextSize(38f);
+        canvas.drawText("SETTINGS", 30f, 60f, p);
+        p.setTypeface(Typeface.DEFAULT);
+        p.setTextSize(20f);
+        canvas.drawText("Sound", 38f, 140f, p);
+        button(canvas, 220f, 130f, 150f, 54f, muted ? "OFF" : "ON", 0x883D566B);
+        canvas.drawText("Ball skin", 38f, 220f, p);
+        button(canvas, 220f, 210f, 150f, 54f, skin == 0 ? "RED" : skin == 1 ? "GOLD" : "GREEN", 0x883D566B);
+        canvas.drawText("Lifetime stars: " + totalGems, 38f, 292f, p);
+        canvas.drawText("Best endless score: " + bestEndless, 38f, 326f, p);
+        button(canvas, 220f, 414f, 220f, 56f, "BACK", 0x88617484);
+    }
+
+    private void overlay(Canvas canvas) {
+        p.setColor(0xAA05080D);
+        canvas.drawRect(0, 0, getWidth(), getHeight(), p);
+    }
+
+    private void button(Canvas canvas, float cx, float cy, float w, float h, String text, int color) {
+        p.setColor(color);
+        canvas.drawRoundRect(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, 18f, 18f, p);
+        stroke.setColor(0x77FFFFFF);
+        stroke.setStrokeWidth(2f);
+        canvas.drawRoundRect(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, 18f, 18f, stroke);
+        p.setColor(Color.WHITE);
+        p.setTypeface(Typeface.DEFAULT_BOLD);
+        p.setTextAlign(Paint.Align.CENTER);
+        p.setTextSize(h * 0.37f);
+        canvas.drawText(text, cx, cy + h * 0.13f, p);
+        p.setTextAlign(Paint.Align.LEFT);
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        final int action = event.getActionMasked();
+        final int actionIndex = event.getActionIndex();
+        final float tx = event.getX(actionIndex);
+        final float ty = event.getY(actionIndex);
+        final int pointerId = event.getPointerId(actionIndex);
+
+        if (ui == 0 && action == MotionEvent.ACTION_UP) {
+            float cx = getWidth() * 0.5f;
+            float h = getHeight();
+            if (hitRect(tx, ty, cx, h * 0.66f, 300f, 76f)) { startLevel(unlocked); return true; }
+            if (hitRect(tx, ty, cx, h * 0.77f, 300f, 70f)) { ui = 1; return true; }
+            if (hitRect(tx, ty, cx, h * 0.87f, 300f, 70f)) { startEndless(); return true; }
+            if (hitRect(tx, ty, cx + 175f, h * 0.77f, 100f, 72f)) { ui = 5; return true; }
+            return true;
+        }
+
+        if (ui == 1 && action == MotionEvent.ACTION_UP) {
+            float cellW = (getWidth() - 70f) / 8f;
+            for (int i = 1; i <= LEVELS; i++) {
+                int row = (i - 1) / 8;
+                int col = (i - 1) % 8;
+                float cx = 40f + col * cellW + cellW * 0.5f;
+                float cy = 122f + row * 72f;
+                if (i <= unlocked && hitRect(tx, ty, cx, cy, 82f, 60f)) { startLevel(i); return true; }
+            }
+            if (hitRect(tx, ty, getWidth() - 74f, getHeight() - 42f, 130f, 70f)) ui = 0;
+            return true;
+        }
+
+        if (ui == 5 && action == MotionEvent.ACTION_UP) {
+            if (hitRect(tx, ty, 220f, 130f, 180f, 70f)) { muted = !muted; save(); return true; }
+            if (hitRect(tx, ty, 220f, 210f, 180f, 70f)) { skin = (skin + 1) % 3; save(); return true; }
+            if (hitRect(tx, ty, 220f, 414f, 250f, 72f)) { ui = 0; return true; }
+            return true;
+        }
+
+        if (ui == 3 && action == MotionEvent.ACTION_UP) {
+            if (hitRect(tx, ty, getWidth() * 0.5f, getHeight() * 0.48f, 270f, 75f)) { ui = 2; clearPointers(); return true; }
+            if (hitRect(tx, ty, getWidth() * 0.5f, getHeight() * 0.61f, 270f, 70f)) { if (endlessMode) startEndless(); else startLevel(level); return true; }
+            if (hitRect(tx, ty, getWidth() * 0.5f, getHeight() * 0.74f, 270f, 70f)) { ui = 1; clearPointers(); return true; }
+            return true;
+        }
+
+        if (ui == 4 && action == MotionEvent.ACTION_UP) {
+            if (hitRect(tx, ty, getWidth() * 0.5f, getHeight() * 0.56f, 290f, 75f)) { if (endlessMode) startEndless(); else startLevel(level < LEVELS ? level + 1 : 1); return true; }
+            if (hitRect(tx, ty, getWidth() * 0.5f, getHeight() * 0.69f, 280f, 70f)) { ui = 1; return true; }
+            return true;
+        }
+
+        if (ui == 2) {
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+                if (ty < 100f && tx > getWidth() - 145f) { ui = 3; clearPointers(); return true; }
+                assignPointer(pointerId, tx, ty);
+                return true;
+            }
+            if (action == MotionEvent.ACTION_MOVE) {
+                refreshPointerRoles(event);
+                return true;
+            }
+            if (action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                clearPointer(pointerId);
+                refreshPointerRoles(event);
+                return true;
+            }
+        }
+        return true;
+    }
+
+    private void assignPointer(int id, float tx, float ty) {
+        float h = getHeight();
+        if (ty < h - 175f) return;
+        if (tx < 150f && leftPointer < 0) leftPointer = id;
+        else if (tx < 300f && rightPointer < 0) rightPointer = id;
+        else if (tx > getWidth() - 180f && jumpPointer < 0) {
+            jumpPointer = id;
+            jumpQueued = true;
+        }
+    }
+
+    private void refreshPointerRoles(MotionEvent event) {
+        int left = leftPointer;
+        int right = rightPointer;
+        int jump = jumpPointer;
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            int id = event.getPointerId(i);
+            float tx = event.getX(i);
+            float ty = event.getY(i);
+            if (id == left || id == right || id == jump) continue;
+            assignPointer(id, tx, ty);
+        }
+    }
+
+    private void clearPointer(int id) {
+        if (leftPointer == id) leftPointer = -1;
+        if (rightPointer == id) rightPointer = -1;
+        if (jumpPointer == id) jumpPointer = -1;
+    }
+
+    private void clearPointers() {
+        leftPointer = -1;
+        rightPointer = -1;
+        jumpPointer = -1;
+    }
+
+    private boolean hitRect(float x, float y, float cx, float cy, float w, float h) {
+        return Math.abs(x - cx) <= w / 2f && Math.abs(y - cy) <= h / 2f;
+    }
+
+    private static boolean circleRect(float cx, float cy, float radius, RectF r) {
+        float nx = clamp(cx, r.left, r.right);
+        float ny = clamp(cy, r.top, r.bottom);
+        float dx = cx - nx;
+        float dy = cy - ny;
+        return dx * dx + dy * dy <= radius * radius;
+    }
+
+    private static boolean hit(float ax, float ay, float ar, float bx, float by, float br) {
+        float dx = ax - bx;
+        float dy = ay - by;
+        float rr = ar + br;
+        return dx * dx + dy * dy <= rr * rr;
+    }
+
+    private static float clamp(float value, float min, float max) { return Math.max(min, Math.min(max, value)); }
+    private static int clampInt(int value, int min, int max) { return Math.max(min, Math.min(max, value)); }
+    private static String formatTime(long ms) { return String.format(Locale.US, "%02d:%02d", (ms / 1000L) / 60L, (ms / 1000L) % 60L); }
+
+    private void burst(float px, float py, int count, int color) {
+        for (int i = 0; i < count; i++) {
+            double angle = particlesRandom.nextDouble() * Math.PI * 2.0;
+            float speed = 50f + particlesRandom.nextFloat() * 290f;
+            particles.add(new Particle(px, py, (float) Math.cos(angle) * speed, (float) Math.sin(angle) * speed - 50f, 2f + particlesRandom.nextFloat() * 5f, color, 0.35f + particlesRandom.nextFloat() * 0.55f));
+        }
+    }
+
+    private void save() {
+        prefs.edit().putInt("unlocked", unlocked).putInt("gems", totalGems).putInt("best_endless", bestEndless).putInt("skin", skin).putBoolean("muted", muted).apply();
+    }
+
+    private static final class Gem {
+        final float x, y, r = 17f;
+        final int phase;
+        boolean collected;
+        Gem(float x, float y, int phase) { this.x = x; this.y = y; this.phase = phase; }
+    }
+
+    private static final class Checkpoint {
+        final float x, y;
+        boolean active;
+        Checkpoint(float x, float y) { this.x = x; this.y = y; }
+    }
+
+    private static final class Particle {
+        float x, y, vx, vy, size, life, maxLife;
+        final int color;
+        Particle(float x, float y, float vx, float vy, float size, int color, float life) { this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.size = size; this.color = color; this.life = life; this.maxLife = life; }
+    }
+
+    private static final class Projectile {
+        float x, y, vx, vy, r, life = 5f;
+        Projectile(float x, float y, float vx, float vy, float r) { this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.r = r; }
+    }
+
+    private static final class Platform {
+        final float baseX, baseY, w, h, range, speed;
+        float x, y, t, dx, dy;
+        final int axis;
+        Platform(float x, float y, float w, float h, float range, float speed, int axis) { this.baseX = this.x = x; this.baseY = this.y = y; this.w = w; this.h = h; this.range = range; this.speed = speed; this.axis = axis; }
+        RectF rect() { return new RectF(x, y, x + w, y + h); }
+    }
+
+    private final class Enemy {
+        float x, y, baseY, speed, t, lastHit;
+        final float minX, maxX, size = 28f;
+        final int type;
+        int dir = 1;
+        boolean alive = true;
+
+        Enemy(float x, float y, int type, float speed) {
+            this.x = x;
+            this.y = y;
+            this.baseY = y;
+            this.type = type;
+            this.speed = speed;
+            this.minX = x - 120f;
+            this.maxX = x + 120f;
+        }
+
+        void update(float dt) {
+            t += dt;
+            if (type == 0) {
+                x += dir * speed * dt;
+                if (x < minX || x > maxX) dir *= -1;
+            } else if (type == 1) {
+                x += (float) Math.sin(t * 2.5f) * speed * 0.45f * dt;
+                y = baseY + (float) Math.sin(t * 3.1f) * 40f;
+            } else {
+                x += dir * speed * dt;
+                y = baseY - (float) Math.abs(Math.sin(t * 2.9f)) * 38f;
+                if (x < minX || x > maxX) dir *= -1;
+            }
+        }
+
+        void draw(Canvas canvas) {
+            int body = type == 0 ? 0xFF4D5664 : type == 1 ? 0xFF694A68 : 0xFF6A4F2D;
+            int accent = type == 0 ? 0xFFFF5B60 : type == 1 ? 0xFFD77CC6 : 0xFFFFAA3B;
+            float s = size;
+            p.setShadowLayer(10f, 0, 6f, 0x66000000);
+            p.setColor(body);
+            canvas.drawRoundRect(x - s, y - s, x + s, y + s, 7f, 7f, p);
+            p.clearShadowLayer();
+            p.setColor(accent);
+            canvas.drawRect(x - s + 5f, y - s + 5f, x + s - 5f, y - s + 10f, p);
+            p.setColor(Color.WHITE);
+            canvas.drawCircle(x - 8f, y - 5f, 5f, p);
+            canvas.drawCircle(x + 8f, y - 5f, 5f, p);
+            p.setColor(0xFF22252C);
+            canvas.drawCircle(x - 7f + dir * 1.5f, y - 4f, 2.5f, p);
+            canvas.drawCircle(x + 9f + dir * 1.5f, y - 4f, 2.5f, p);
+            p.setColor(0xFF23252B);
+            canvas.drawRoundRect(x - 10f, y + 7f, x + 10f, y + 13f, 3f, 3f, p);
+        }
+    }
 }
